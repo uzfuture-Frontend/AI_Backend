@@ -44,15 +44,7 @@ from ai.oyin_ai import OyinAI
 
 # OpenAI global config
 api_key = os.getenv("OPENAI_API_KEY")
-print(f"🔑 Environment variable: {api_key[:20] if api_key else 'None'}...")
-print(f"🔑 All environment variables: {list(os.environ.keys())}")
 
-if api_key:
-    openai.api_key = api_key
-    print("✅ API key set successfully")
-else:
-    print("❌ OPENAI_API_KEY not found in environment")
-openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Logger
 logger = structlog.get_logger()
@@ -174,6 +166,166 @@ def get_db():
     finally:
         db.close()
 
+# main.py fayliga qo'shish kerak bo'lgan kod
+
+# POST /api/chats endpoint - ETISHMAYOTGAN!
+@app.post("/api/chats")
+async def create_new_chat(request: Request, db: Session = Depends(get_db)):
+    """Yangi chat yaratish - Frontend'dan keladigan POST so'rovi uchun"""
+    try:
+        body = await request.json()
+        title = body.get("title", "Yangi Chat")
+        user_id = str(body.get("user_id", ""))
+        ai_type = body.get("ai_type", "chat")
+        messages = body.get("messages", [])
+        
+        print(f"🆕 CREATE NEW CHAT: title={title}, user={user_id}, type={ai_type}")
+        
+        if not user_id:
+            return PlainTextResponse("error|missing_user_id|User ID is required", status_code=400)
+        
+        # Yangi chat ID yaratish
+        new_chat_id = str(uuid.uuid4())
+        
+        # Yangi conversation yaratish
+        conversation = Conversation(
+            id=new_chat_id,
+            user_id=user_id,
+            ai_type=ai_type,
+            title=title,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
+        )
+        db.add(conversation)
+        
+        # Agar xabarlar bor bo'lsa, ularni ham saqlash
+        if messages:
+            for msg_data in messages:
+                if isinstance(msg_data, dict):
+                    message = Message(
+                        id=str(uuid.uuid4()),
+                        conversation_id=new_chat_id,
+                        user_id=user_id,
+                        content=msg_data.get('text', ''),
+                        ai_response=msg_data.get('ai_response', ''),
+                        timestamp=datetime.utcnow()
+                    )
+                    db.add(message)
+        
+        db.commit()
+        
+        print(f"✅ NEW CHAT CREATED: {new_chat_id}")
+        return PlainTextResponse(f"success|{new_chat_id}|Chat created successfully")
+        
+    except Exception as e:
+        print(f"❌ CREATE CHAT ERROR: {str(e)}")
+        return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
+
+# OPTIONS handler ham kerak CORS uchun
+@app.options("/api/chats")
+async def options_chats():
+    """CORS OPTIONS handler for POST /api/chats"""
+    return PlainTextResponse("", status_code=200)
+
+# AI Timeout muammosini hal qilish uchun
+@app.middleware("http")
+async def timeout_middleware(request: Request, call_next):
+    """Request timeout middleware"""
+    import asyncio
+    
+    # AI endpoint'lar uchun katta timeout
+    if request.url.path.startswith("/api/ai/"):
+        timeout = 120.0  # 2 minut
+    else:
+        timeout = 30.0   # 30 soniya
+    
+    try:
+        response = await asyncio.wait_for(call_next(request), timeout=timeout)
+        return response
+    except asyncio.TimeoutError:
+        return PlainTextResponse("error|timeout|Request timeout", status_code=408)
+
+# AI Response metodini optimizlash
+async def process_chat(ai_assistant, message: str, user_id: str, conversation_id: str | None, ai_type: str, db: Session):
+    try:
+        if not user_id:
+            return PlainTextResponse("error|missing_user_id|User ID is required", status_code=400)
+        if not message:
+            return PlainTextResponse("error|missing_message|Message is required", status_code=400)
+        
+        print(f"🤖 Processing AI chat: type={ai_type}, user={user_id}, msg_length={len(message)}")
+        
+        # AI javobini olish - async with timeout
+        import asyncio
+        try:
+            ai_response = await asyncio.wait_for(
+                ai_assistant.get_response(message), 
+                timeout=90.0  # 90 soniya AI uchun
+            )
+        except asyncio.TimeoutError:
+            ai_response = "Kechirasiz, javob berish uchun vaqt tugadi. Iltimos, qayta urinib ko'ring."
+        
+        if not ai_response:
+            ai_response = "Kechirasiz, javob olishda xatolik yuz berdi."
+        
+        # Yangi suhbat yaratish
+        if not conversation_id:
+            conversation_id = str(uuid.uuid4())
+            conversation = Conversation(
+                id=conversation_id,
+                user_id=user_id,
+                ai_type=ai_type,
+                title=message[:50] + "..." if len(message) > 50 else message
+            )
+            db.add(conversation)
+            print(f"🆕 New conversation created: {conversation_id}")
+        
+        # Xabarni saqlash
+        message_entry = Message(
+            id=str(uuid.uuid4()),
+            conversation_id=conversation_id,
+            user_id=user_id,
+            content=message,
+            ai_response=ai_response
+        )
+        db.add(message_entry)
+        
+        # Statistikani yangilash
+        stats = db.query(UserStats).filter(
+            UserStats.user_id == user_id,
+            UserStats.ai_type == ai_type
+        ).first()
+        
+        if not stats:
+            stats = UserStats(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                ai_type=ai_type,
+                usage_count=1
+            )
+            db.add(stats)
+        else:
+            stats.usage_count += 1
+            stats.last_used = datetime.utcnow()
+        
+        # Suhbat vaqtini yangilash
+        if conversation_id:
+            conversation = db.query(Conversation).filter(
+                Conversation.id == conversation_id
+            ).first()
+            if conversation:
+                conversation.updated_at = datetime.utcnow()
+        
+        db.commit()
+        
+        print(f"✅ AI response saved: {len(ai_response)} chars")
+        return PlainTextResponse(f"success|{ai_response}|{conversation_id}")
+        
+    except Exception as e:
+        print(f"❌ AI Chat processing failed for {ai_type}: {str(e)}")
+        db.rollback()  # Rollback xatolik bo'lsa
+        return PlainTextResponse(f"error|chat_failed|Xatolik yuz berdi: {str(e)}", status_code=500)
+        
 # MUHIM TUZATISH: /api prefix qo'shish
 @app.get("/")
 async def root():
