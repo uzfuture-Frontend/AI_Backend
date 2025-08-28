@@ -43,6 +43,15 @@ from ai.oyin_ai import OyinAI
 
 
 # OpenAI global config
+api_key = os.getenv("OPENAI_API_KEY")
+print(f"🔑 Environment variable: {api_key[:20] if api_key else 'None'}...")
+print(f"🔑 All environment variables: {list(os.environ.keys())}")
+
+if api_key:
+    openai.api_key = api_key
+    print("✅ API key set successfully")
+else:
+    print("❌ OPENAI_API_KEY not found in environment")
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Logger
