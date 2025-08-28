@@ -447,49 +447,98 @@ async def create_chat(request: Request):
         print(f"Create chat error: {str(e)}")
         return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
 
-# Update chat
+# TUZATILGAN PUT ENDPOINT
 @app.put("/api/chats/{chat_id}")
 async def update_chat(chat_id: str, request: Request):
-    """Update chat"""
+    """Update chat - FIXED VERSION"""
     try:
         body = await request.json()
-        title = body.get("title", "New Chat")
-        user_id = str(body.get("user_id", ""))
-        ai_type = body.get("ai_type", "chat")
         
+        # Frontend dan kelayotgan ma'lumotlar
+        user_id = str(body.get("user_id", ""))
+        ai_id = body.get("ai_id")  # ai_type emas, ai_id!
+        messages = body.get("messages", [])
+        preview = body.get("preview", "New Chat")
+        message_count = body.get("message_count", 0)
+        
+        # User ID tekshirish
         if not user_id or user_id == "undefined":
             return PlainTextResponse("error|missing_user_id|User ID required", status_code=400)
         
+        # AI type ni ID dan aniqlash
+        ai_type = AI_ID_MAPPING.get(ai_id, "chat") if ai_id else "chat"
+        
+        # Database connection
         conn = get_db_connection()
         if not conn:
             return PlainTextResponse("error|db_error|Database connection failed", status_code=500)
         
         cursor = conn.cursor()
         
-        # Check if conversation exists
-        cursor.execute("SELECT id FROM conversations WHERE id = %s", (chat_id,))
-        exists = cursor.fetchone()
+        try:
+            # Conversation mavjudligini tekshirish
+            cursor.execute("SELECT id FROM conversations WHERE id = %s AND user_id = %s", (chat_id, user_id))
+            exists = cursor.fetchone()
+            
+            if exists:
+                # Mavjud conversation ni yangilash
+                cursor.execute("""
+                    UPDATE conversations 
+                    SET title = %s, ai_type = %s, updated_at = NOW() 
+                    WHERE id = %s AND user_id = %s
+                """, (preview, ai_type, chat_id, user_id))
+                
+                # Agar messages bor bo'lsa, ularni saqlash
+                if messages:
+                    # Eski messages ni o'chirish (ixtiyoriy)
+                    # cursor.execute("DELETE FROM messages WHERE conversation_id = %s", (chat_id,))
+                    
+                    # Yangi messages ni saqlash yoki yangilash
+                    for msg in messages:
+                        if msg.get('type') == 'user':
+                            # User message
+                            msg_id = msg.get('id', str(uuid.uuid4()))
+                            cursor.execute("""
+                                INSERT INTO messages (id, conversation_id, user_id, content, timestamp) 
+                                VALUES (%s, %s, %s, %s, %s)
+                                ON DUPLICATE KEY UPDATE content = VALUES(content)
+                            """, (msg_id, chat_id, user_id, msg.get('content', ''), msg.get('timestamp')))
+                        
+                        elif msg.get('type') == 'ai':
+                            # AI response - oxirgi user message ga bog'lash
+                            cursor.execute("""
+                                UPDATE messages 
+                                SET ai_response = %s 
+                                WHERE conversation_id = %s AND user_id = %s AND ai_response IS NULL
+                                ORDER BY timestamp DESC LIMIT 1
+                            """, (msg.get('content', ''), chat_id, user_id))
+                
+                print(f"Chat updated: {chat_id}")
+                
+            else:
+                # Yangi conversation yaratish
+                cursor.execute("""
+                    INSERT INTO conversations (id, user_id, ai_type, title) 
+                    VALUES (%s, %s, %s, %s)
+                """, (chat_id, user_id, ai_type, preview))
+                
+                print(f"New conversation created: {chat_id}")
+            
+            # Commit changes
+            conn.commit()
+            
+            return PlainTextResponse("success|chat_updated|Chat updated successfully")
+            
+        except Exception as db_error:
+            print(f"Database error in update_chat: {str(db_error)}")
+            conn.rollback()
+            return PlainTextResponse(f"error|db_error|{str(db_error)}", status_code=500)
         
-        if exists:
-            # Update existing conversation
-            cursor.execute("""
-                UPDATE conversations 
-                SET title = %s, updated_at = NOW() 
-                WHERE id = %s AND user_id = %s
-            """, (title, chat_id, user_id))
-        else:
-            # Create new conversation
-            cursor.execute("""
-                INSERT INTO conversations (id, user_id, ai_type, title) 
-                VALUES (%s, %s, %s, %s)
-            """, (chat_id, user_id, ai_type, title))
+        finally:
+            cursor.close()
+            conn.close()
         
-        conn.commit()
-        cursor.close()
-        conn.close()
-        
-        print(f"Chat updated/created: {chat_id}")
-        return PlainTextResponse("success|chat_updated|Chat updated successfully")
+
         
     except Exception as e:
         print(f"Update chat error: {str(e)}")
