@@ -166,86 +166,9 @@ def get_db():
     finally:
         db.close()
 
-# main.py fayliga qo'shish kerak bo'lgan kod
+# main.py ga qo'shiladigan tuzatishlar
 
-# POST /api/chats endpoint - ETISHMAYOTGAN!
-@app.post("/api/chats")
-async def create_new_chat(request: Request, db: Session = Depends(get_db)):
-    """Yangi chat yaratish - Frontend'dan keladigan POST so'rovi uchun"""
-    try:
-        body = await request.json()
-        title = body.get("title", "Yangi Chat")
-        user_id = str(body.get("user_id", ""))
-        ai_type = body.get("ai_type", "chat")
-        messages = body.get("messages", [])
-        
-        print(f"🆕 CREATE NEW CHAT: title={title}, user={user_id}, type={ai_type}")
-        
-        if not user_id:
-            return PlainTextResponse("error|missing_user_id|User ID is required", status_code=400)
-        
-        # Yangi chat ID yaratish
-        new_chat_id = str(uuid.uuid4())
-        
-        # Yangi conversation yaratish
-        conversation = Conversation(
-            id=new_chat_id,
-            user_id=user_id,
-            ai_type=ai_type,
-            title=title,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
-        )
-        db.add(conversation)
-        
-        # Agar xabarlar bor bo'lsa, ularni ham saqlash
-        if messages:
-            for msg_data in messages:
-                if isinstance(msg_data, dict):
-                    message = Message(
-                        id=str(uuid.uuid4()),
-                        conversation_id=new_chat_id,
-                        user_id=user_id,
-                        content=msg_data.get('text', ''),
-                        ai_response=msg_data.get('ai_response', ''),
-                        timestamp=datetime.utcnow()
-                    )
-                    db.add(message)
-        
-        db.commit()
-        
-        print(f"✅ NEW CHAT CREATED: {new_chat_id}")
-        return PlainTextResponse(f"success|{new_chat_id}|Chat created successfully")
-        
-    except Exception as e:
-        print(f"❌ CREATE CHAT ERROR: {str(e)}")
-        return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
-
-# OPTIONS handler ham kerak CORS uchun
-@app.options("/api/chats")
-async def options_chats():
-    """CORS OPTIONS handler for POST /api/chats"""
-    return PlainTextResponse("", status_code=200)
-
-# AI Timeout muammosini hal qilish uchun
-@app.middleware("http")
-async def timeout_middleware(request: Request, call_next):
-    """Request timeout middleware"""
-    import asyncio
-    
-    # AI endpoint'lar uchun katta timeout
-    if request.url.path.startswith("/api/ai/"):
-        timeout = 120.0  # 2 minut
-    else:
-        timeout = 30.0   # 30 soniya
-    
-    try:
-        response = await asyncio.wait_for(call_next(request), timeout=timeout)
-        return response
-    except asyncio.TimeoutError:
-        return PlainTextResponse("error|timeout|Request timeout", status_code=408)
-
-# AI Response metodini optimizlash
+# 1. AI Response timeout ni kamaytirish
 async def process_chat(ai_assistant, message: str, user_id: str, conversation_id: str | None, ai_type: str, db: Session):
     try:
         if not user_id:
@@ -255,77 +178,241 @@ async def process_chat(ai_assistant, message: str, user_id: str, conversation_id
         
         print(f"🤖 Processing AI chat: type={ai_type}, user={user_id}, msg_length={len(message)}")
         
-        # AI javobini olish - async with timeout
+        # AI javobini olish - TIMEOUT NI KAMAYTIRISH
         import asyncio
         try:
             ai_response = await asyncio.wait_for(
                 ai_assistant.get_response(message), 
-                timeout=90.0  # 90 soniya AI uchun
+                timeout=30.0  # 30 soniyaga kamaytirish
             )
         except asyncio.TimeoutError:
-            ai_response = "Kechirasiz, javob berish uchun vaqt tugadi. Iltimos, qayta urinib ko'ring."
+            print(f"⏰ AI timeout for {ai_type}")
+            ai_response = f"Kechirasiz, {ai_type} AI javobi uchun vaqt tugadi. Iltimos, qisqaroq savol bering."
+        except Exception as e:
+            print(f"❌ AI Error: {str(e)}")
+            ai_response = f"Kechirasiz, {ai_type} AI da xatolik yuz berdi."
         
         if not ai_response:
             ai_response = "Kechirasiz, javob olishda xatolik yuz berdi."
         
-        # Yangi suhbat yaratish
-        if not conversation_id:
-            conversation_id = str(uuid.uuid4())
-            conversation = Conversation(
-                id=conversation_id,
-                user_id=user_id,
-                ai_type=ai_type,
-                title=message[:50] + "..." if len(message) > 50 else message
-            )
-            db.add(conversation)
-            print(f"🆕 New conversation created: {conversation_id}")
-        
-        # Xabarni saqlash
-        message_entry = Message(
-            id=str(uuid.uuid4()),
-            conversation_id=conversation_id,
-            user_id=user_id,
-            content=message,
-            ai_response=ai_response
-        )
-        db.add(message_entry)
-        
-        # Statistikani yangilash
-        stats = db.query(UserStats).filter(
-            UserStats.user_id == user_id,
-            UserStats.ai_type == ai_type
-        ).first()
-        
-        if not stats:
-            stats = UserStats(
+        # Database operatsiyalari
+        try:
+            # Yangi suhbat yaratish
+            if not conversation_id:
+                conversation_id = str(uuid.uuid4())
+                conversation = Conversation(
+                    id=conversation_id,
+                    user_id=user_id,
+                    ai_type=ai_type,
+                    title=message[:50] + "..." if len(message) > 50 else message,
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow()
+                )
+                db.add(conversation)
+                print(f"🆕 New conversation created: {conversation_id}")
+            
+            # Xabarni saqlash
+            message_entry = Message(
                 id=str(uuid.uuid4()),
+                conversation_id=conversation_id,
                 user_id=user_id,
-                ai_type=ai_type,
-                usage_count=1
+                content=message,
+                ai_response=ai_response,
+                timestamp=datetime.utcnow()
             )
-            db.add(stats)
-        else:
-            stats.usage_count += 1
-            stats.last_used = datetime.utcnow()
-        
-        # Suhbat vaqtini yangilash
-        if conversation_id:
-            conversation = db.query(Conversation).filter(
-                Conversation.id == conversation_id
+            db.add(message_entry)
+            
+            # Statistikani yangilash
+            stats = db.query(UserStats).filter(
+                UserStats.user_id == user_id,
+                UserStats.ai_type == ai_type
             ).first()
-            if conversation:
-                conversation.updated_at = datetime.utcnow()
-        
-        db.commit()
-        
-        print(f"✅ AI response saved: {len(ai_response)} chars")
-        return PlainTextResponse(f"success|{ai_response}|{conversation_id}")
+            
+            if not stats:
+                stats = UserStats(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    ai_type=ai_type,
+                    usage_count=1,
+                    last_used=datetime.utcnow()
+                )
+                db.add(stats)
+            else:
+                stats.usage_count += 1
+                stats.last_used = datetime.utcnow()
+            
+            # Suhbat vaqtini yangilash
+            if conversation_id:
+                conversation = db.query(Conversation).filter(
+                    Conversation.id == conversation_id
+                ).first()
+                if conversation:
+                    conversation.updated_at = datetime.utcnow()
+            
+            db.commit()
+            
+            print(f"✅ AI response saved: {len(ai_response)} chars")
+            return PlainTextResponse(f"success|{ai_response}|{conversation_id}")
+            
+        except Exception as db_error:
+            print(f"❌ Database error: {str(db_error)}")
+            db.rollback()
+            # AI javobni qaytarish hatto DB da xatolik bo'lsa ham
+            return PlainTextResponse(f"success|{ai_response}|temp_id")
         
     except Exception as e:
         print(f"❌ AI Chat processing failed for {ai_type}: {str(e)}")
-        db.rollback()  # Rollback xatolik bo'lsa
         return PlainTextResponse(f"error|chat_failed|Xatolik yuz berdi: {str(e)}", status_code=500)
+
+# 2. Timeout middleware ni tuzatish
+@app.middleware("http")
+async def timeout_middleware(request: Request, call_next):
+    """Request timeout middleware - TUZATILGAN"""
+    import asyncio
+    
+    # AI endpoint'lar uchun timeout
+    if request.url.path.startswith("/api/ai/"):
+        timeout = 60.0  # 1 minut
+    elif request.url.path.startswith("/api/chat/"):
+        timeout = 60.0  # 1 minut
+    else:
+        timeout = 30.0   # 30 soniya
+    
+    try:
+        response = await asyncio.wait_for(call_next(request), timeout=timeout)
+        return response
+    except asyncio.TimeoutError:
+        print(f"⏰ Request timeout: {request.url.path}")
+        return PlainTextResponse("error|timeout|Request timeout", status_code=408)
+    except Exception as e:
+        print(f"❌ Middleware error: {str(e)}")
+        return PlainTextResponse(f"error|server_error|{str(e)}", status_code=500)
+
+# 3. Database connection ni mustahkamlash
+def get_db():
+    """Database session with better error handling"""
+    db = SessionLocal()
+    try:
+        # Test connection
+        db.execute("SELECT 1")
+        yield db
+    except Exception as e:
+        print(f"❌ Database connection error: {str(e)}")
+        db.rollback()
+        raise e
+    finally:
+        db.close()
+
+# 4. POST /api/chats endpoint ni tuzatish
+@app.post("/api/chats")
+async def create_new_chat(request: Request, db: Session = Depends(get_db)):
+    """Yangi chat yaratish - TUZATILGAN"""
+    try:
+        body = await request.json()
+        title = body.get("title", "Yangi Chat")
+        user_id = str(body.get("user_id", ""))
+        ai_type = body.get("ai_type", "chat")
+        messages = body.get("messages", [])
         
+        print(f"🆕 CREATE NEW CHAT: title={title}, user={user_id}, type={ai_type}")
+        
+        if not user_id or user_id == "undefined":
+            return PlainTextResponse("error|missing_user_id|User ID is required", status_code=400)
+        
+        # Yangi chat ID yaratish
+        new_chat_id = str(uuid.uuid4())
+        
+        try:
+            # Yangi conversation yaratish
+            conversation = Conversation(
+                id=new_chat_id,
+                user_id=user_id,
+                ai_type=ai_type,
+                title=title,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+            db.add(conversation)
+            
+            # Agar xabarlar bor bo'lsa, ularni ham saqlash
+            if messages:
+                for msg_data in messages:
+                    if isinstance(msg_data, dict):
+                        message = Message(
+                            id=str(uuid.uuid4()),
+                            conversation_id=new_chat_id,
+                            user_id=user_id,
+                            content=msg_data.get('text', ''),
+                            ai_response=msg_data.get('ai_response', ''),
+                            timestamp=datetime.utcnow()
+                        )
+                        db.add(message)
+            
+            db.commit()
+            
+            print(f"✅ NEW CHAT CREATED: {new_chat_id}")
+            return PlainTextResponse(f"success|{new_chat_id}|Chat created successfully")
+            
+        except Exception as db_error:
+            print(f"❌ Database error in create chat: {str(db_error)}")
+            db.rollback()
+            return PlainTextResponse(f"error|db_error|Database error: {str(db_error)}", status_code=500)
+        
+    except Exception as e:
+        print(f"❌ CREATE CHAT ERROR: {str(e)}")
+        return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
+
+# 5. Health check endpoint qo'shish
+@app.get("/api/health/db")
+async def db_health_check(db: Session = Depends(get_db)):
+    """Database connection health check"""
+    try:
+        result = db.execute("SELECT 1").scalar()
+        if result == 1:
+            return PlainTextResponse("success|db_healthy|Database connection OK")
+        else:
+            return PlainTextResponse("error|db_unhealthy|Database connection failed", status_code=500)
+    except Exception as e:
+        return PlainTextResponse(f"error|db_error|{str(e)}", status_code=500)
+
+# 6. AI assistants ni tekshirish
+@app.get("/api/health/ai")
+async def ai_health_check():
+    """AI assistants health check"""
+    try:
+        available_ais = list(AI_ASSISTANTS.keys())
+        return PlainTextResponse(f"success|{','.join(available_ais)}|AI assistants available: {len(available_ais)}")
+    except Exception as e:
+        return PlainTextResponse(f"error|ai_error|{str(e)}", status_code=500)
+
+# 7. Logging ni yaxshilash
+import logging
+
+# Logger setup
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# 8. Error handling ni yaxshilash
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Global exception handler - TUZATILGAN"""
+    import traceback
+    error_details = traceback.format_exc()
+    
+    print(f"❌ GLOBAL ERROR: {request.url.path}")
+    print(f"Error: {str(exc)}")
+    print(f"Traceback: {error_details}")
+    
+    logger.error(f"Unexpected error on {request.url.path}: {str(exc)}")
+    
+    return PlainTextResponse(
+        f"error|server_error|Internal server error", 
+        status_code=500
+    )
+    
 # MUHIM TUZATISH: /api prefix qo'shish
 @app.get("/")
 async def root():
