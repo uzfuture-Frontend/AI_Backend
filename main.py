@@ -1,17 +1,20 @@
+# Add these imports at the top of main.py (replace the imports section):
+
 from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer
-from sqlalchemy.orm import declarative_base
+from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from datetime import datetime
 import os
-
-
 import uuid
 import structlog
 import openai
 import pymysql
+import jwt
+import json
+import logging
+import asyncio
 
 # AI assistants import (assuming these are defined in your project)
 from ai.chat_ai import ChatAI
@@ -110,6 +113,8 @@ app = FastAPI(
 )
 
 # CORS middleware
+# Replace the CORS middleware configuration in main.py with this:
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -117,11 +122,11 @@ app.add_middleware(
         "http://127.0.0.1:5173", 
         "http://172.22.224.1:5173",
         "http://192.168.56.1:5173",
-        "http://10.5.49.167:5173"
+        "http://10.5.49.167:5173",  # MISSING COMMA WAS HERE!
         "https://aibackend-production-f601.up.railway.app",
-        "https://www.aiuniverse.uz",       # Production frontend
-        "http://www.aiuniverse.uz",        # HTTP variant (agar kerak bo'lsa)
-        "https://aiuniverse.uz",           # www siz variant
+        "https://www.aiuniverse.uz",
+        "http://www.aiuniverse.uz",
+        "https://aiuniverse.uz",
         "http://aiuniverse.uz"  
     ],
     allow_credentials=True,
@@ -412,7 +417,7 @@ async def global_exception_handler(request: Request, exc: Exception):
         f"error|server_error|Internal server error", 
         status_code=500
     )
-    
+
 # MUHIM TUZATISH: /api prefix qo'shish
 @app.get("/")
 async def root():
@@ -1250,17 +1255,31 @@ async def delete_all_user_chats(user_id: int, db: Session = Depends(get_db)):
         print(f"❌ DELETE ALL CHATS ERROR: {str(e)}")
         return PlainTextResponse(f"error|delete_all_failed|{str(e)}", status_code=500)
 
-# 6. OPTIONS handlers - CORS uchun
+# Add these OPTIONS handlers to main.py (put them near the end, before if __name__ == "__main__"):
+
+@app.options("/api/stats/user/{user_id}")
+async def options_user_stats():
+    return PlainTextResponse("", status_code=200)
+
+@app.options("/api/chats/user/{user_id}")
+async def options_user_chats():
+    return PlainTextResponse("", status_code=200)
+
+@app.options("/api/ai/{ai_id}")
+async def options_ai_chat():
+    return PlainTextResponse("", status_code=200)
+
 @app.options("/api/chats/{chat_id}")
-async def options_chat():
-    """CORS OPTIONS handler for chat deletion"""
+async def options_chat_update():
     return PlainTextResponse("", status_code=200)
 
-@app.options("/api/chats/user/{user_id}/all") 
-async def options_all_chats():
-    """CORS OPTIONS handler for delete all chats"""
+@app.options("/auth/google")
+async def options_google_auth():
     return PlainTextResponse("", status_code=200)
 
+@app.options("/api/auth/google")
+async def options_api_google_auth():
+    return PlainTextResponse("", status_code=200)
 # Main.py ga qo'shish kerak bo'lgan endpoint:
 
 @app.get("/api/chats/{chat_id}/messages")
