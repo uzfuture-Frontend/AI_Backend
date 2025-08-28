@@ -6,7 +6,8 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from datetime import datetime
 import os
-from dotenv import load_dotenv
+
+
 import uuid
 import structlog
 import openai
