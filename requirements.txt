@@ -10,7 +10,7 @@ sqlalchemy==2.0.23
 mysql-connector-python==8.2.0
 
 # Authentication & Security
-pyjwt==2.8.0
+PyJWT==2.8.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.6
 
@@ -26,7 +26,7 @@ python-dotenv==1.0.0
 # Data Validation
 pydantic==2.5.0
 
-# Email Support (optional)
+# Email Support
 emails==0.6
 
 # Development Tools
@@ -40,19 +40,13 @@ gunicorn==21.2.0
 # Monitoring & Logging
 structlog==23.2.0
 
-# Additional Utilities
-numpy==1.24.3
-pandas==2.1.3
+# Additional Utilities - Fixed for Python 3.12
+numpy>=1.26.0
+pandas>=2.1.3
 python-jose[cryptography]==3.3.0
 
 # API Documentation
-python-multipart==0.0.6
-
-# CORS Support
-python-cors==1.7.0
-
-# JSON Web Tokens
-PyJWT==2.8.0
+fastapi[all]==0.104.1
 
 # Password Hashing
 bcrypt==4.1.2
@@ -60,8 +54,7 @@ bcrypt==4.1.2
 # Date and Time
 python-dateutil==2.8.2
 
-# Async Support
-asyncio==3.4.3
+
 
 # HTTP Status Codes
 starlette==0.27.0
@@ -72,16 +65,16 @@ typing-extensions==4.8.0
 # Configuration Management
 pydantic-settings==2.1.0
 
-# Database Migrations (optional)
+# Database Migrations
 alembic==1.13.1
 
-# Redis (optional - for caching)
+# Redis (for caching)
 redis==5.0.1
 
 # File Upload Support
 aiofiles==23.2.1
 
-# Image Processing (optional)
+# Image Processing
 Pillow==10.1.0
 
 # Text Processing
@@ -90,8 +83,7 @@ nltk==3.8.1
 # Timezone Support
 pytz==2023.3
 
-# UUID Generation
-uuid==1.30
+
 
 # Regular Expressions
 regex==2023.10.3
