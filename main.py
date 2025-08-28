@@ -39,8 +39,7 @@ from ai.arxitektura_ai import ArxitekturaAI
 from ai.ekologiya_ai import EkologiyaAI
 from ai.oyin_ai import OyinAI
 
-# Load environment variables
-load_dotenv()
+
 
 # OpenAI global config
 openai.api_key = os.getenv("OPENAI_API_KEY")
