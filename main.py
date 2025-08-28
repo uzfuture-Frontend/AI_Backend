@@ -48,7 +48,7 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 logger = structlog.get_logger()
 
 # Database setup
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL") or "mysql+pymysql://myapp_user:strong_password@localhost:3306/myapp_db"
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
