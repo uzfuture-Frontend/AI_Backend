@@ -117,6 +117,11 @@ app.add_middleware(
         "http://172.22.224.1:5173",
         "http://192.168.56.1:5173",
         "http://10.5.49.167:5173"
+        "https://aibackend-production-f601.up.railway.app",
+        "https://www.aiuniverse.uz",       # Production frontend
+        "http://www.aiuniverse.uz",        # HTTP variant (agar kerak bo'lsa)
+        "https://aiuniverse.uz",           # www siz variant
+        "http://aiuniverse.uz"  
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
