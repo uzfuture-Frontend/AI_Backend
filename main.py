@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 import uuid
 import structlog
 import openai
+import pymysql
 
 # AI assistants import (assuming these are defined in your project)
 from ai.chat_ai import ChatAI
@@ -46,6 +47,8 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Logger
 logger = structlog.get_logger()
+
+pymysql.install_as_MySQLdb()
 
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL")
