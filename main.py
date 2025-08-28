@@ -8,6 +8,10 @@ import uuid
 import json
 import asyncio
 
+# OpenAI API key setup
+import openai
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
 # AI assistants import
 from ai.chat_ai import ChatAI
 from ai.tarjimon_ai import TarjimonAI
@@ -443,6 +447,54 @@ async def create_chat(request: Request):
         print(f"Create chat error: {str(e)}")
         return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
 
+# Update chat
+@app.put("/api/chats/{chat_id}")
+async def update_chat(chat_id: str, request: Request):
+    """Update chat"""
+    try:
+        body = await request.json()
+        title = body.get("title", "New Chat")
+        user_id = str(body.get("user_id", ""))
+        ai_type = body.get("ai_type", "chat")
+        
+        if not user_id or user_id == "undefined":
+            return PlainTextResponse("error|missing_user_id|User ID required", status_code=400)
+        
+        conn = get_db_connection()
+        if not conn:
+            return PlainTextResponse("error|db_error|Database connection failed", status_code=500)
+        
+        cursor = conn.cursor()
+        
+        # Check if conversation exists
+        cursor.execute("SELECT id FROM conversations WHERE id = %s", (chat_id,))
+        exists = cursor.fetchone()
+        
+        if exists:
+            # Update existing conversation
+            cursor.execute("""
+                UPDATE conversations 
+                SET title = %s, updated_at = NOW() 
+                WHERE id = %s AND user_id = %s
+            """, (title, chat_id, user_id))
+        else:
+            # Create new conversation
+            cursor.execute("""
+                INSERT INTO conversations (id, user_id, ai_type, title) 
+                VALUES (%s, %s, %s, %s)
+            """, (chat_id, user_id, ai_type, title))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        print(f"Chat updated/created: {chat_id}")
+        return PlainTextResponse("success|chat_updated|Chat updated successfully")
+        
+    except Exception as e:
+        print(f"Update chat error: {str(e)}")
+        return PlainTextResponse(f"error|update_failed|{str(e)}", status_code=500)
+
 # Delete chat
 @app.delete("/api/chats/{chat_id}")
 async def delete_chat(chat_id: str, request: Request):
@@ -547,6 +599,10 @@ async def options_stats():
 
 @app.options("/api/chats")
 async def options_create_chat():
+    return PlainTextResponse("", status_code=200)
+
+@app.options("/api/chats/{chat_id}")
+async def options_update_chat():
     return PlainTextResponse("", status_code=200)
 
 @app.options("/api/auth/google")
