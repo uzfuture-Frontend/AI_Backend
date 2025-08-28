@@ -53,7 +53,8 @@ pymysql.install_as_MySQLdb()
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL muhit o'zgaruvchisi aniqlanmadi. Iltimos, Railwayda to'g'ri sozlang.")
+    DATABASE_URL = "mysql+pymysql://root:XRCcOHObEeRtWRSJzlFzyWZNltFjgjKi@turntable.proxy.rlwy.net:49805/railway"
+    print("DATABASE_URL o'rnatildi: MySQL ishlatilmoqda")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
