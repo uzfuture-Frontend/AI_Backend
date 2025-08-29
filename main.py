@@ -597,6 +597,60 @@ async def delete_all_user_chats(user_id: int, db: Session = Depends(get_db)):
         print(f"DELETE ALL CHATS ERROR: {str(e)}")
         return PlainTextResponse(f"error|delete_all_failed|{str(e)}", status_code=500)
 
+# Chat management endpoints qo'shing
+@app.post("/api/chats")
+async def create_or_update_chat(request: Request, db: Session = Depends(get_db)):
+    """Chat yaratish yoki yangilash - frontenddan kelayotgan so'rovlar uchun"""
+    try:
+        body = await request.json()
+        chat_id = body.get("id") or str(uuid.uuid4())
+        title = body.get("title", "New Chat")
+        user_id = str(body.get("user_id", ""))
+        ai_type = body.get("ai_type", "chat")
+        
+        print(f"CREATE/UPDATE CHAT: {chat_id}, user: {user_id}, type: {ai_type}")
+        
+        conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
+        
+        if not conversation:
+            conversation = Conversation(
+                id=chat_id,
+                user_id=user_id,
+                ai_type=ai_type,
+                title=title,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+            db.add(conversation)
+            print(f"NEW CHAT CREATED: {chat_id}")
+        else:
+            conversation.title = title
+            conversation.updated_at = datetime.utcnow()
+            print(f"CHAT UPDATED: {chat_id}")
+        
+        db.commit()
+        
+        # Chat ma'lumotlarini qaytarish
+        chat_data = {
+            "id": conversation.id,
+            "ai_type": conversation.ai_type,
+            "title": conversation.title,
+            "created_at": conversation.created_at.isoformat(),
+            "updated_at": conversation.updated_at.isoformat()
+        }
+        
+        return PlainTextResponse(f"success|{json.dumps(chat_data)}|Chat saved successfully")
+        
+    except Exception as e:
+        print(f"CREATE CHAT ERROR: {str(e)}")
+        return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
+
+# OPTIONS handler qo'shing
+@app.options("/api/chats")
+async def options_chats():
+    """CORS OPTIONS handler for /api/chats"""
+    return PlainTextResponse("", status_code=200)
+
 # Stats endpoints
 @app.get("/api/stats/user/{user_id}")
 async def get_user_stats_api(user_id: int, db: Session = Depends(get_db)):
