@@ -25,7 +25,7 @@ logger = structlog.get_logger()
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     # Railway MySQL URL
-    DATABASE_URL = "mysql+pymysql://root:bAfVxLLBaYZZFoKEKvnJxLOgJRQZCvpX@turntable.proxy.rlwy.net:49805/railway"
+    DATABASE_URL = "mysql+pymysql://root:XRCcOHObEeRtWRSJzlFzyWZNltFjgjKi@turntable.proxy.rlwy.net:49805/railway"
     print("DATABASE_URL environment variable yo'q, default MySQL ishlatilmoqda")
 
 # MySQL uchun SQLAlchemy URL ni to'g'rilash
