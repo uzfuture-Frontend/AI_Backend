@@ -16,17 +16,27 @@ import json
 # Load environment variables
 load_dotenv()
 
-# OpenAI client setup
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-print(f"DEBUG: API Key mavjud: {api_key is not None}")
-print(f"DEBUG: API Key uzunligi: {len(api_key) if api_key else 0}")
+print("🔍 DEBUG: Environment variables:")
+print(f"OPENAI_API_KEY mavjud: {'✅' if os.getenv('OPENAI_API_KEY') else '❌'}")
+if os.getenv('OPENAI_API_KEY'):
+    print(f"OPENAI_API_KEY uzunligi: {len(os.getenv('OPENAI_API_KEY'))}")
+    print(f"OPENAI_API_KEY boshi: {os.getenv('OPENAI_API_KEY')[:20]}...")
 
+# Barcha environment variables
+print("Barcha env vars:")
+for key, value in os.environ.items():
+    if 'OPENAI' in key:
+        print(f"{key}: {value[:20] if value else 'None'}...")
+
+# OpenAI client setup
+api_key = os.getenv("OPENAI_API_KEY")
 if api_key:
-    openai_client = OpenAI(api_key=api_key)
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
     print("✅ OpenAI client yaratildi")
 else:
-    openai_client = None
-    print("❌ OPENAI_API_KEY environment variable topilmadi!")
+    client = None
+    print("❌ OPENAI_API_KEY topilmadi!")
 
 # Logger
 logger = structlog.get_logger()
