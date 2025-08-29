@@ -8,7 +8,7 @@ class ObHavoAI:
         # OpenAI yangi client yaratish
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            print("⚠️ OPENAI_API_KEY not found in environment")
+           # print("⚠️ OPENAI_API_KEY not found in environment")
             self.client = None
         else:
             self.client = OpenAI(api_key=api_key)
