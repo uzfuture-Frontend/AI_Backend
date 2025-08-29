@@ -17,7 +17,7 @@ import json
 load_dotenv()
 
 # OpenAI client setup
-api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 print(f"DEBUG: API Key mavjud: {api_key is not None}")
 print(f"DEBUG: API Key uzunligi: {len(api_key) if api_key else 0}")
 
