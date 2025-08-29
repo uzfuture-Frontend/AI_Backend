@@ -213,9 +213,8 @@ async def health_check():
 async def api_health_check():
     return PlainTextResponse("success|healthy|Server is running")
 
-# Auth endpoints
-@app.post("/auth/google")
-async def google_auth(request: Request, db: Session = Depends(get_db)):
+@app.post("/api/auth/google") 
+async def api_google_auth(request: Request, db: Session = Depends(get_db)):
     try:
         body = await request.json()
         
@@ -223,7 +222,6 @@ async def google_auth(request: Request, db: Session = Depends(get_db)):
         if 'token' in body:
             # JWT tokenni decode qilish
             try:
-                # JWT tokenni verify qilmasdan decode qilish (faqat payload olish uchun)
                 payload = jwt.decode(body['token'], options={"verify_signature": False})
                 
                 email = payload.get('email')
@@ -235,7 +233,6 @@ async def google_auth(request: Request, db: Session = Depends(get_db)):
                 return PlainTextResponse("error|invalid_token|Invalid JWT token", status_code=400)
         
         elif 'user_data' in body:
-            # Direct user data format
             user_data = body['user_data']
             email = user_data.get('email')
             name = user_data.get('name') 
@@ -243,7 +240,6 @@ async def google_auth(request: Request, db: Session = Depends(get_db)):
             google_id = user_data.get('google_id')
         
         else:
-            # Simple format
             email = body.get("email")
             name = body.get("name")
             picture = body.get("picture", "")
@@ -256,9 +252,8 @@ async def google_auth(request: Request, db: Session = Depends(get_db)):
         user = db.query(User).filter(User.email == email).first()
         
         if not user:
-            # Yangi foydalanuvchi yaratish
             user = User(
-                id=str(uuid.uuid4()),
+                id=str(uuid.uuid4()),  # TO'G'RILASH: id ni string sifatida saqlash
                 email=email,
                 name=name,
                 picture=picture,
@@ -268,7 +263,6 @@ async def google_auth(request: Request, db: Session = Depends(get_db)):
             db.commit()
             logger.info(f"New user created: {email}")
         else:
-            # Mavjud foydalanuvchi ma'lumotlarini yangilash
             user.name = name
             user.picture = picture
             db.commit()
@@ -276,7 +270,7 @@ async def google_auth(request: Request, db: Session = Depends(get_db)):
         
         # Response format: success|user_info_json|message
         user_info = {
-            "id": user.id,
+            "id": str(user.id),  # TO'G'RILASH: id ni string ga aylantirish
             "email": user.email,
             "name": user.name,
             "picture": user.picture,
@@ -308,7 +302,7 @@ async def process_chat(ai_assistant, message: str, user_id: str, conversation_id
             conversation_id = str(uuid.uuid4())
             conversation = Conversation(
                 id=conversation_id,
-                user_id=user_id,
+                user_id=str(user_id),  # TO'G'RILASH: user_id ni string ga aylantirish
                 ai_type=ai_type,
                 title=message[:50] + "..." if len(message) > 50 else message
             )
@@ -318,7 +312,7 @@ async def process_chat(ai_assistant, message: str, user_id: str, conversation_id
         message_entry = Message(
             id=str(uuid.uuid4()),
             conversation_id=conversation_id,
-            user_id=user_id,
+            user_id=str(user_id),  # TO'G'RILASH: string
             content=message,
             ai_response=ai_response
         )
@@ -326,14 +320,14 @@ async def process_chat(ai_assistant, message: str, user_id: str, conversation_id
         
         # Statistikani yangilash
         stats = db.query(UserStats).filter(
-            UserStats.user_id == user_id,
+            UserStats.user_id == str(user_id),
             UserStats.ai_type == ai_type
         ).first()
         
         if not stats:
             stats = UserStats(
                 id=str(uuid.uuid4()),
-                user_id=user_id,
+                user_id=str(user_id),  # TO'G'RILASH: string
                 ai_type=ai_type,
                 usage_count=1
             )
