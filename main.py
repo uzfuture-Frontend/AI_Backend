@@ -17,7 +17,12 @@ load_dotenv()
 
 # OpenAI global config
 openai.api_key = os.getenv("OPENAI_API_KEY")
-
+api_key = os.getenv("OPENAI_API_KEY")
+if api_key:
+    openai.api_key = api_key
+    print(f"✅ OpenAI API key loaded: {len(api_key)} characters")
+else:
+    print("❌ OPENAI_API_KEY environment variable not found!")
 # Logger
 logger = structlog.get_logger()
 
