@@ -27,14 +27,20 @@ if api_key:
     print("✅ OpenAI API key o'rnatildi")
 else:
     print("❌ OPENAI_API_KEY environment variable topilmadi!")
+
 # Logger
 logger = structlog.get_logger()
 
 # Database setup - MySQL uchun tuzatilgan
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    # Railway MySQL URL
-    DATABASE_URL = "mysql+pymysql://root:XRCcOHObEeRtWRSJzlFzyWZNltFjgjKi@turntable.proxy.rlwy.net:49805/railway"
+    # Railway MySQL URL - Environment variables'dan qurish
+    db_user = os.getenv("DB_USER", "root")
+    db_password = os.getenv("DB_PASSWORD", "XRCcOHObEeRtWRSJzlFzyWZNltFjgjKi")
+    db_host = os.getenv("DB_HOST", "turntable.proxy.rlwy.net")
+    db_port = os.getenv("DB_PORT", "49805")
+    db_name = os.getenv("DB_NAME", "railway")
+    DATABASE_URL = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
     print("DATABASE_URL environment variable yo'q, default MySQL ishlatilmoqda")
 
 # MySQL uchun SQLAlchemy URL ni to'g'rilash
@@ -48,7 +54,8 @@ try:
         DATABASE_URL, 
         pool_pre_ping=True,
         pool_recycle=3600,  # MySQL connection timeout uchun
-        echo=False
+        echo=False,
+        connect_args={"charset": "utf8mb4"}  # UTF-8 uchun
     )
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base = declarative_base()
@@ -109,20 +116,24 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware
+# CORS middleware - Environment variables'dan olish
+cors_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://www.aiuniverse.uz",
+    "https://www.aiuniverse.uz",
+    "http://aiuniverse.uz", 
+    "https://aiuniverse.uz",
+    "https://*.railway.app",
+    "https://aiuniverse-production.up.railway.app"
+]
+
 app.add_middleware(
-  CORSMiddleware,
-  allow_origins=[
-      "http://localhost:5173",  # Qo'shish: Frontend dev
-      "http://www.aiuniverse.uz",
-      "https://www.aiuniverse.uz",
-      "http://aiuniverse.uz", 
-      "https://aiuniverse.uz",
-      "https://*.railway.app"
-  ],
-  allow_credentials=True,
-  allow_methods=["*"],
-  allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # AI assistants import - Xatolikdan himoyalanish
@@ -395,7 +406,7 @@ async def api_chat_by_id(ai_id: int, request: Request, db: Session = Depends(get
         logger.error(f"API chat by ID failed for {ai_id}", error=str(e))
         return PlainTextResponse(f"error|api_chat_failed|{str(e)}", status_code=500)
 
-# Chat endpoints for all AI types
+# Chat endpoints for all AI types - DUPLIKATLAR O'CHIRILDI
 chat_endpoints = [
     "chat", "tarjimon", "blockchain", "tadqiqot", "smart_energy", "dasturlash",
     "tibbiy", "talim", "biznes", "huquq", "psixologik", "moliya", "sayohat",
@@ -403,17 +414,70 @@ chat_endpoints = [
     "fan", "ovozli", "arxitektura", "ekologiya", "oyun"
 ]
 
-# Dynamic endpoint creation
+# Dynamic endpoint creation - Bir martalik
 for ai_type in chat_endpoints:
-    @app.post(f"/chat/{ai_type}")
-    @app.post(f"/api/chat/{ai_type}")
-    async def create_chat_endpoint(request: Request, ai_type=ai_type, db: Session = Depends(get_db)):
-        return await handle_chat_request(request, ai_type, db)
+    # Closure yaratish uchun default parameter ishlatamiz
+    def create_handler(ai_type_name):
+        async def handler(request: Request, db: Session = Depends(get_db)):
+            return await handle_chat_request(request, ai_type_name, db)
+        return handler
+    
+    # Har bir AI type uchun endpoint yaratish
+    handler = create_handler(ai_type)
+    app.add_api_route(f"/chat/{ai_type}", handler, methods=["POST"])
+    app.add_api_route(f"/api/chat/{ai_type}", handler, methods=["POST"])
 
 # Chat management endpoints
+@app.post("/api/chats")
+async def create_or_update_chat(request: Request, db: Session = Depends(get_db)):
+    """Chat yaratish yoki yangilash"""
+    try:
+        body = await request.json()
+        chat_id = body.get("id") or str(uuid.uuid4())
+        title = body.get("title", "New Chat")
+        user_id = str(body.get("user_id", ""))
+        ai_type = body.get("ai_type", "chat")
+        
+        print(f"CREATE/UPDATE CHAT: {chat_id}, user: {user_id}, type: {ai_type}")
+        
+        conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
+        
+        if not conversation:
+            conversation = Conversation(
+                id=chat_id,
+                user_id=user_id,
+                ai_type=ai_type,
+                title=title,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+            db.add(conversation)
+            print(f"NEW CHAT CREATED: {chat_id}")
+        else:
+            conversation.title = title
+            conversation.updated_at = datetime.utcnow()
+            print(f"CHAT UPDATED: {chat_id}")
+        
+        db.commit()
+        
+        # Chat ma'lumotlarini qaytarish
+        chat_data = {
+            "id": conversation.id,
+            "ai_type": conversation.ai_type,
+            "title": conversation.title,
+            "created_at": conversation.created_at.isoformat(),
+            "updated_at": conversation.updated_at.isoformat()
+        }
+        
+        return PlainTextResponse(f"success|{json.dumps(chat_data)}|Chat saved successfully")
+        
+    except Exception as e:
+        print(f"CREATE CHAT ERROR: {str(e)}")
+        return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
+
 @app.put("/api/chats/{chat_id}")
 async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_db)):
-    """Chat yangilash/yaratish"""
+    """Chat yangilash"""
     try:
         body = await request.json()
         title = body.get("title", "New Chat")
@@ -448,7 +512,7 @@ async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_
         return PlainTextResponse(f"error|update_failed|{str(e)}", status_code=500)
 
 @app.get("/api/chats/user/{user_id}")
-async  def get_user_chats(user_id: str, db: Session = Depends(get_db)):
+async def get_user_chats(user_id: str, db: Session = Depends(get_db)):
     """User ning barcha chatlari"""
     try:
         print(f"GET USER CHATS: {user_id}")
@@ -605,60 +669,6 @@ async def delete_all_user_chats(user_id: int, db: Session = Depends(get_db)):
         print(f"DELETE ALL CHATS ERROR: {str(e)}")
         return PlainTextResponse(f"error|delete_all_failed|{str(e)}", status_code=500)
 
-# Chat management endpoints qo'shing
-@app.post("/api/chats")
-async def create_or_update_chat(request: Request, db: Session = Depends(get_db)):
-    """Chat yaratish yoki yangilash - frontenddan kelayotgan so'rovlar uchun"""
-    try:
-        body = await request.json()
-        chat_id = body.get("id") or str(uuid.uuid4())
-        title = body.get("title", "New Chat")
-        user_id = str(body.get("user_id", ""))
-        ai_type = body.get("ai_type", "chat")
-        
-        print(f"CREATE/UPDATE CHAT: {chat_id}, user: {user_id}, type: {ai_type}")
-        
-        conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-        
-        if not conversation:
-            conversation = Conversation(
-                id=chat_id,
-                user_id=user_id,
-                ai_type=ai_type,
-                title=title,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow()
-            )
-            db.add(conversation)
-            print(f"NEW CHAT CREATED: {chat_id}")
-        else:
-            conversation.title = title
-            conversation.updated_at = datetime.utcnow()
-            print(f"CHAT UPDATED: {chat_id}")
-        
-        db.commit()
-        
-        # Chat ma'lumotlarini qaytarish
-        chat_data = {
-            "id": conversation.id,
-            "ai_type": conversation.ai_type,
-            "title": conversation.title,
-            "created_at": conversation.created_at.isoformat(),
-            "updated_at": conversation.updated_at.isoformat()
-        }
-        
-        return PlainTextResponse(f"success|{json.dumps(chat_data)}|Chat saved successfully")
-        
-    except Exception as e:
-        print(f"CREATE CHAT ERROR: {str(e)}")
-        return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
-
-# OPTIONS handler qo'shing
-@app.options("/api/chats")
-async def options_chats():
-    """CORS OPTIONS handler for /api/chats"""
-    return PlainTextResponse("", status_code=200)
-
 # Stats endpoints
 @app.get("/api/stats/user/{user_id}")
 async def get_user_stats_api(user_id: int, db: Session = Depends(get_db)):
@@ -722,154 +732,219 @@ async def get_user_chart_stats_api(user_id: int, db: Session = Depends(get_db)):
         print(f"GET CHART STATS ERROR: {str(e)}")
         return PlainTextResponse(f"error|chart_failed|{str(e)}", status_code=500)
 
-# Legacy endpoints
+# Legacy endpoints - backward compatibility uchun
 @app.get("/conversations")
-async def get_conversations(user_id: str, db: Session = Depends(get_db)):
-    return await get_user_chats(int(user_id), db)
+async def get_conversations_legacy(user_id: str, db: Session = Depends(get_db)):
+    """Legacy endpoint - conversations"""
+    return await get_user_chats(user_id, db)
 
 @app.get("/api/conversations")
-async def api_get_conversations(user_id: str, db: Session = Depends(get_db)):
-    return await get_user_chats(int(user_id), db)
+async def api_get_conversations_legacy(user_id: str, db: Session = Depends(get_db)):
+    """Legacy API endpoint - conversations"""
+    return await get_user_chats(user_id, db)
 
-
-
-
-# Main.py ga qo'shing - DELETE ENDPOINTS
-
-# 4. DELETE /api/chats/{chat_id} - Bitta chatni o'chirish
-@app.delete("/api/chats/{chat_id}")
-async def delete_chat(chat_id: str, request: Request, db: Session = Depends(get_db)):
-    """Bitta chatni o'chirish"""
-    try:
-        # Query parameters yoki request body dan user_id olish
-        user_id = request.query_params.get("user_id")
-        if not user_id:
-            try:
-                body = await request.json()
-                user_id = body.get("user_id")
-            except:
-                pass
-        
-        print(f"🗑️ DELETE CHAT: {chat_id}, user: {user_id}")
-        
-        if chat_id == "undefined" or not chat_id:
-            return PlainTextResponse("error|invalid_chat_id|Chat ID is required", status_code=400)
-        
-        # Chat mavjudligini tekshirish
-        conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-        
-        if not conversation:
-            return PlainTextResponse("error|chat_not_found|Chat not found", status_code=404)
-        
-        # User tegishli ekanligini tekshirish (agar user_id berilgan bo'lsa)
-        if user_id and conversation.user_id != str(user_id):
-            return PlainTextResponse("error|unauthorized|Unauthorized to delete this chat", status_code=403)
-        
-        # Avval xabarlarni o'chirish
-        db.query(Message).filter(Message.conversation_id == chat_id).delete()
-        
-        # Keyin chatni o'chirish
-        db.delete(conversation)
-        db.commit()
-        
-        print(f"✅ CHAT DELETED: {chat_id}")
-        return PlainTextResponse("success|chat_deleted|Chat deleted successfully")
-        
-    except Exception as e:
-        print(f"❌ DELETE CHAT ERROR: {str(e)}")
-        return PlainTextResponse(f"error|delete_failed|{str(e)}", status_code=500)
-
-# 5. DELETE /api/chats/user/{user_id}/all - User ning barcha chatlarini o'chirish
-@app.delete("/api/chats/user/{user_id}/all")
-async def delete_all_user_chats(user_id: int, db: Session = Depends(get_db)):
-    """User ning barcha chatlarini o'chirish"""
-    try:
-        print(f"🗑️ DELETE ALL CHATS FOR USER: {user_id}")
-        
-        # User ning barcha conversation ID larini olish
-        conversations = db.query(Conversation).filter(
-            Conversation.user_id == str(user_id)
-        ).all()
-        
-        if not conversations:
-            print(f"ℹ️ No chats found for user {user_id}")
-            return PlainTextResponse("error|no_chats|No chats found to delete", status_code=404)
-        
-        conversation_ids = [conv.id for conv in conversations]
-        
-        # Avval barcha xabarlarni o'chirish
-        for conv_id in conversation_ids:
-            db.query(Message).filter(Message.conversation_id == conv_id).delete()
-        
-        # Keyin barcha chatlarni o'chirish
-        db.query(Conversation).filter(
-            Conversation.user_id == str(user_id)
-        ).delete()
-        
-        db.commit()
-        
-        print(f"✅ ALL CHATS DELETED FOR USER: {user_id} ({len(conversations)} chats)")
-        return PlainTextResponse(f"success|all_chats_deleted|{len(conversations)} chats deleted successfully")
-        
-    except Exception as e:
-        print(f"❌ DELETE ALL CHATS ERROR: {str(e)}")
-        return PlainTextResponse(f"error|delete_all_failed|{str(e)}", status_code=500)
-
-# 6. OPTIONS handlers - CORS uchun
-@app.options("/api/chats/{chat_id}")
-async def options_chat():
-    """CORS OPTIONS handler for chat deletion"""
+# OPTIONS handlers - CORS uchun
+@app.options("/api/chats")
+async def options_chats():
+    """CORS OPTIONS handler for /api/chats"""
     return PlainTextResponse("", status_code=200)
 
-@app.options("/api/chats/user/{user_id}/all") 
+@app.options("/api/chats/{chat_id}")
+async def options_chat():
+    """CORS OPTIONS handler for chat operations"""
+    return PlainTextResponse("", status_code=200)
+
+@app.options("/api/chats/user/{user_id}/all")
 async def options_all_chats():
     """CORS OPTIONS handler for delete all chats"""
     return PlainTextResponse("", status_code=200)
 
-# Main.py ga qo'shish kerak bo'lgan endpoint:
-
-@app.get("/api/chats/{chat_id}/messages")
-async def get_chat_messages_api(chat_id: str, db: Session = Depends(get_db)):
-    """Chat xabarlarini olish - API format"""
-    try:
-        print(f"🔍 GET CHAT MESSAGES: {chat_id}")
-        
-        # Chat mavjudligini tekshirish
-        conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-        
-        if not conversation:
-            print(f"❌ Chat not found: {chat_id}")
-            return PlainTextResponse("error|chat_not_found|Chat not found", status_code=404)
-        
-        # Xabarlarni olish
-        messages = db.query(Message).filter(
-            Message.conversation_id == chat_id
-        ).order_by(Message.timestamp.asc()).all()
-        
-        if not messages:
-            print(f"ℹ️ No messages found for chat: {chat_id}")
-            return PlainTextResponse("success|no_messages|No messages found")
-        
-        # Xabarlarni formatlash
-        messages_data = []
-        for msg in messages:
-            messages_data.append(f"MSG:{msg.id}|{msg.content}|{msg.ai_response}|{msg.timestamp}")
-        
-        result = "\n".join(messages_data)
-        print(f"✅ Found {len(messages)} messages for chat: {chat_id}")
-        
-        return PlainTextResponse(f"success|{result}|Messages retrieved")
-        
-    except Exception as e:
-        print(f"❌ GET MESSAGES ERROR: {str(e)}")
-        return PlainTextResponse(f"error|get_messages_failed|{str(e)}", status_code=500)
-
-# OPTIONS handler ham qo'shing CORS uchun
 @app.options("/api/chats/{chat_id}/messages")
 async def options_chat_messages():
     """CORS OPTIONS handler for chat messages"""
     return PlainTextResponse("", status_code=200)
 
+@app.options("/api/stats/user/{user_id}")
+async def options_user_stats():
+    """CORS OPTIONS handler for user stats"""
+    return PlainTextResponse("", status_code=200)
+
+@app.options("/api/stats/chart/user/{user_id}")
+async def options_chart_stats():
+    """CORS OPTIONS handler for chart stats"""
+    return PlainTextResponse("", status_code=200)
+
+@app.options("/auth/google")
+async def options_google_auth():
+    """CORS OPTIONS handler for Google auth"""
+    return PlainTextResponse("", status_code=200)
+
+@app.options("/api/auth/google")
+async def options_api_google_auth():
+    """CORS OPTIONS handler for API Google auth"""
+    return PlainTextResponse("", status_code=200)
+
+# Dynamic OPTIONS handlers for chat endpoints
+for ai_type in chat_endpoints:
+    def create_options_handler():
+        async def handler():
+            return PlainTextResponse("", status_code=200)
+        return handler
+    
+    # OPTIONS handlers yaratish
+    options_handler = create_options_handler()
+    app.add_api_route(f"/chat/{ai_type}", options_handler, methods=["OPTIONS"])
+    app.add_api_route(f"/api/chat/{ai_type}", options_handler, methods=["OPTIONS"])
+
+# AI ID endpoints uchun OPTIONS
+@app.options("/api/ai/{ai_id}")
+async def options_ai_by_id():
+    """CORS OPTIONS handler for AI by ID"""
+    return PlainTextResponse("", status_code=200)
+
+# Error handlers
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc):
+    return PlainTextResponse("error|not_found|Endpoint not found", status_code=404)
+
+@app.exception_handler(500)
+async def internal_error_handler(request: Request, exc):
+    logger.error("Internal server error", error=str(exc))
+    return PlainTextResponse("error|server_error|Internal server error", status_code=500)
+
+# Health check with database
+@app.get("/api/health/db")
+async def health_check_db(db: Session = Depends(get_db)):
+    """Database bilan birga health check"""
+    try:
+        # Simple query to test DB connection
+        result = db.execute("SELECT 1").fetchone()
+        return PlainTextResponse("success|healthy|Database connection OK")
+    except Exception as e:
+        logger.error("Database health check failed", error=str(e))
+        return PlainTextResponse(f"error|db_error|Database connection failed: {str(e)}", status_code=500)
+
+# AI modules status
+@app.get("/api/ai/status")
+async def ai_modules_status():
+    """AI modullarining holati"""
+    try:
+        status_data = []
+        for ai_type, ai_instance in AI_ASSISTANTS.items():
+            is_dummy = isinstance(ai_instance, DummyAI)
+            status = "dummy" if is_dummy else "active"
+            status_data.append(f"{ai_type}:{status}")
+        
+        result = "\n".join(status_data)
+        active_count = len([ai for ai in AI_ASSISTANTS.values() if not isinstance(ai, DummyAI)])
+        dummy_count = len([ai for ai in AI_ASSISTANTS.values() if isinstance(ai, DummyAI)])
+        
+        summary = f"SUMMARY:active={active_count},dummy={dummy_count},total={len(AI_ASSISTANTS)}"
+        
+        return PlainTextResponse(f"success|{result}\n{summary}|AI modules status retrieved")
+        
+    except Exception as e:
+        print(f"AI STATUS ERROR: {str(e)}")
+        return PlainTextResponse(f"error|status_failed|{str(e)}", status_code=500)
+
+# Development endpoints (faqat DEBUG mode da)
+if os.getenv("DEBUG", "False").lower() == "true":
+    @app.get("/api/debug/tables")
+    async def debug_tables(db: Session = Depends(get_db)):
+        """Debug: Database tables info"""
+        try:
+            tables_info = []
+            
+            # Users table
+            users_count = db.query(User).count()
+            tables_info.append(f"users:{users_count}")
+            
+            # Conversations table  
+            conversations_count = db.query(Conversation).count()
+            tables_info.append(f"conversations:{conversations_count}")
+            
+            # Messages table
+            messages_count = db.query(Message).count()
+            tables_info.append(f"messages:{messages_count}")
+            
+            # UserStats table
+            stats_count = db.query(UserStats).count()
+            tables_info.append(f"user_stats:{stats_count}")
+            
+            result = "\n".join(tables_info)
+            return PlainTextResponse(f"success|{result}|Tables info retrieved")
+            
+        except Exception as e:
+            return PlainTextResponse(f"error|debug_failed|{str(e)}", status_code=500)
+
+    @app.get("/api/debug/env")
+    async def debug_env():
+        """Debug: Environment variables (maskirovka qilingan)"""
+        try:
+            env_info = []
+            
+            # Muhim environment variables
+            important_vars = [
+                "DATABASE_URL", "DB_HOST", "DB_USER", "DB_NAME", "DB_PORT",
+                "OPENAI_API_KEY", "GOOGLE_CLIENT_ID", "JWT_SECRET", 
+                "HOST", "PORT", "DEBUG", "CORS_ORIGINS"
+            ]
+            
+            for var in important_vars:
+                value = os.getenv(var, "NOT_SET")
+                if var in ["DATABASE_URL", "OPENAI_API_KEY", "JWT_SECRET", "DB_PASSWORD", "GOOGLE_CLIENT_SECRET"]:
+                    # Sensitive ma'lumotlarni mask qilish
+                    if value and value != "NOT_SET":
+                        masked = value[:10] + "***" + value[-5:] if len(value) > 15 else "***"
+                        env_info.append(f"{var}:{masked}")
+                    else:
+                        env_info.append(f"{var}:NOT_SET")
+                else:
+                    env_info.append(f"{var}:{value}")
+            
+            result = "\n".join(env_info)
+            return PlainTextResponse(f"success|{result}|Environment info retrieved")
+            
+        except Exception as e:
+            return PlainTextResponse(f"error|debug_failed|{str(e)}", status_code=500)
+
+# Startup event
+@app.on_event("startup")
+async def startup_event():
+    """Server ishga tushganda"""
+    print("🚀 AI Universe Server starting...")
+    print(f"📊 Total AI assistants loaded: {len(AI_ASSISTANTS)}")
+    active_ais = [name for name, ai in AI_ASSISTANTS.items() if not isinstance(ai, DummyAI)]
+    dummy_ais = [name for name, ai in AI_ASSISTANTS.items() if isinstance(ai, DummyAI)]
+    print(f"✅ Active AI modules: {len(active_ais)} - {', '.join(active_ais[:5])}{'...' if len(active_ais) > 5 else ''}")
+    print(f"⚠️ Dummy AI modules: {len(dummy_ais)} - {', '.join(dummy_ais[:5])}{'...' if len(dummy_ais) > 5 else ''}")
+    print("🌐 Server ready to serve requests!")
+
+# Shutdown event  
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Server to'xtashda"""
+    print("🛑 AI Universe Server shutting down...")
+    print("👋 Goodbye!")
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), log_level="info", reload=False)
+    
+    # Environment variables'dan server config olish
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", 8000))
+    debug = os.getenv("DEBUG", "False").lower() == "true"
+    log_level = os.getenv("LOG_LEVEL", "info").lower()
+    
+    print(f"🔧 Starting server on {host}:{port}")
+    print(f"🔍 Debug mode: {debug}")
+    print(f"📝 Log level: {log_level}")
+    
+    uvicorn.run(
+        "main:app", 
+        host=host, 
+        port=port, 
+        log_level=log_level, 
+        reload=debug,  # Faqat debug mode da reload
+        access_log=True
+    )
