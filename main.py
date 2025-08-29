@@ -427,7 +427,7 @@ for ai_type in chat_endpoints:
     app.add_api_route(f"/chat/{ai_type}", handler, methods=["POST"])
     app.add_api_route(f"/api/chat/{ai_type}", handler, methods=["POST"])
 
-# Chat management endpoints
+# Chat creation endpoint'ini ham yaxshilash
 @app.post("/api/chats")
 async def create_or_update_chat(request: Request, db: Session = Depends(get_db)):
     """Chat yaratish yoki yangilash"""
@@ -435,28 +435,44 @@ async def create_or_update_chat(request: Request, db: Session = Depends(get_db))
         body = await request.json()
         chat_id = body.get("id") or str(uuid.uuid4())
         title = body.get("title", "New Chat")
-        user_id = str(body.get("user_id", ""))
+        user_id = str(body.get("user_id", "")).strip()
         ai_type = body.get("ai_type", "chat")
         
-        print(f"CREATE/UPDATE CHAT: {chat_id}, user: {user_id}, type: {ai_type}")
+        # User ID tekshirish
+        if not user_id or user_id == "":
+            print(f"⚠️ WARNING: Empty user_id for chat creation")
+            # Headers'dan user_id olishga harakat qilish
+            auth_header = request.headers.get("authorization", "")
+            if auth_header:
+                try:
+                    token = auth_header.replace("Bearer ", "")
+                    payload = jwt.decode(token, options={"verify_signature": False})
+                    user_id = payload.get("sub", payload.get("user_id", ""))
+                    print(f"🔍 User ID from token: {user_id}")
+                except Exception as e:
+                    print(f"❌ Token decode error: {str(e)}")
+        
+        print(f"CREATE/UPDATE CHAT: {chat_id}, user: {user_id or 'EMPTY'}, type: {ai_type}")
         
         conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
         
         if not conversation:
             conversation = Conversation(
                 id=chat_id,
-                user_id=user_id,
+                user_id=user_id or "anonymous",
                 ai_type=ai_type,
                 title=title,
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow()
             )
             db.add(conversation)
-            print(f"NEW CHAT CREATED: {chat_id}")
+            print(f"NEW CHAT CREATED: {chat_id} for user: {user_id or 'anonymous'}")
         else:
             conversation.title = title
             conversation.updated_at = datetime.utcnow()
-            print(f"CHAT UPDATED: {chat_id}")
+            if user_id:
+                conversation.user_id = user_id
+            print(f"CHAT UPDATED: {chat_id} for user: {conversation.user_id}")
         
         db.commit()
         
@@ -465,6 +481,7 @@ async def create_or_update_chat(request: Request, db: Session = Depends(get_db))
             "id": conversation.id,
             "ai_type": conversation.ai_type,
             "title": conversation.title,
+            "user_id": conversation.user_id,
             "created_at": conversation.created_at.isoformat(),
             "updated_at": conversation.updated_at.isoformat()
         }
@@ -472,43 +489,86 @@ async def create_or_update_chat(request: Request, db: Session = Depends(get_db))
         return PlainTextResponse(f"success|{json.dumps(chat_data)}|Chat saved successfully")
         
     except Exception as e:
-        print(f"CREATE CHAT ERROR: {str(e)}")
+        print(f"❌ CREATE CHAT ERROR: {str(e)}")
         return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
 
+# Logging yaxshilash uchun middleware qo'shish
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Request logging middleware"""
+    start_time = datetime.utcnow()
+    
+    # Request ma'lumotlarini log qilish
+    client_ip = request.client.host if request.client else "unknown"
+    user_agent = request.headers.get("user-agent", "unknown")[:100]  # Qisqartirish
+    
+    response = await call_next(request)
+    
+    # Response vaqtini hisoblash
+    process_time = (datetime.utcnow() - start_time).total_seconds()
+    
+    # Faqat muhim endpoint'larni log qilish
+    if any(path in str(request.url.path) for path in ["/api/", "/chat/", "/auth/"]):
+        print(f"🌐 {request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s - IP: {client_ip}")
+    
+    return response
+    
+# Chat update endpoint'ini yaxshilash
 @app.put("/api/chats/{chat_id}")
 async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_db)):
     """Chat yangilash"""
     try:
         body = await request.json()
         title = body.get("title", "New Chat")
-        user_id = str(body.get("user_id", ""))
+        user_id = str(body.get("user_id", "")).strip()
         ai_type = body.get("ai_type", "chat")
         
-        print(f"UPDATE CHAT: {chat_id}, user: {user_id}, type: {ai_type}")
+        # User ID tekshirish
+        if not user_id or user_id == "":
+            print(f"⚠️ WARNING: Empty user_id for chat {chat_id}")
+            # Headers'dan user_id olishga harakat qilish
+            auth_header = request.headers.get("authorization", "")
+            if auth_header:
+                try:
+                    # JWT token'dan user ma'lumotlarini olish
+                    token = auth_header.replace("Bearer ", "")
+                    payload = jwt.decode(token, options={"verify_signature": False})
+                    user_id = payload.get("sub", payload.get("user_id", ""))
+                    print(f"🔍 User ID from token: {user_id}")
+                except Exception as e:
+                    print(f"❌ Token decode error: {str(e)}")
+        
+        print(f"UPDATE CHAT: {chat_id}, user: {user_id or 'EMPTY'}, type: {ai_type}")
         
         conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
         
         if not conversation:
+            # Yangi chat yaratish
             conversation = Conversation(
                 id=chat_id,
-                user_id=user_id,
+                user_id=user_id or "anonymous",  # Bo'sh bo'lsa anonymous qilish
                 ai_type=ai_type,
                 title=title,
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow()
             )
             db.add(conversation)
-            print(f"NEW CHAT CREATED: {chat_id}")
+            print(f"NEW CHAT CREATED: {chat_id} for user: {user_id or 'anonymous'}")
         else:
+            # Mavjud chat yangilash
             conversation.title = title
             conversation.updated_at = datetime.utcnow()
-            print(f"CHAT UPDATED: {chat_id}")
+            # Agar user_id mavjud bo'lsa, yangilash
+            if user_id:
+                conversation.user_id = user_id
+            print(f"CHAT UPDATED: {chat_id} for user: {conversation.user_id}")
         
         db.commit()
+        
         return PlainTextResponse("success|chat_saved|Chat saved successfully")
         
     except Exception as e:
-        print(f"UPDATE CHAT ERROR: {str(e)}")
+        print(f"❌ UPDATE CHAT ERROR: {str(e)}")
         return PlainTextResponse(f"error|update_failed|{str(e)}", status_code=500)
 
 @app.get("/api/chats/user/{user_id}")
