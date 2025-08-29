@@ -104,13 +104,11 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173", 
-        "http://172.22.224.1:5173",
-        "http://192.168.56.1:5173",
-        "http://10.5.49.167:5173",
-        "https://*.railway.app",
-        "*"  # Development uchun
+        "http://www.aiuniverse.uz",
+        "https://www.aiuniverse.uz",
+        "http://aiuniverse.uz", 
+        "https://aiuniverse.uz",
+        "https://*.railway.app"
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
