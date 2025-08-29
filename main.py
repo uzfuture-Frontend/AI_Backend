@@ -1,3 +1,4 @@
+# TO'G'RILANGAN BACKEND MAIN.PY
 from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
@@ -8,21 +9,20 @@ import os
 from dotenv import load_dotenv
 import uuid
 import structlog
-from openai import OpenAI  # Yangi import
+from openai import OpenAI
 import jwt
 import json
 
 # Load environment variables
 load_dotenv()
 
-# OpenAI yangi client yaratish
+# OpenAI client setup
 api_key = os.getenv("OPENAI_API_KEY")
 print(f"DEBUG: API Key mavjud: {api_key is not None}")
 print(f"DEBUG: API Key uzunligi: {len(api_key) if api_key else 0}")
-print(f"DEBUG: API Key boshlanishi: {api_key[:15] if api_key else 'None'}...")
 
 if api_key:
-    openai_client = OpenAI(api_key=api_key)  # Yangi client
+    openai_client = OpenAI(api_key=api_key)
     print("✅ OpenAI client yaratildi")
 else:
     openai_client = None
@@ -31,19 +31,16 @@ else:
 # Logger
 logger = structlog.get_logger()
 
-# Database setup - MySQL uchun tuzatilgan
+# Database setup - MySQL
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    # Railway MySQL URL - Environment variables'dan qurish
     db_user = os.getenv("DB_USER", "root")
     db_password = os.getenv("DB_PASSWORD", "XRCcOHObEeRtWRSJzlFzyWZNltFjgjKi")
     db_host = os.getenv("DB_HOST", "turntable.proxy.rlwy.net")
     db_port = os.getenv("DB_PORT", "49805")
     db_name = os.getenv("DB_NAME", "railway")
     DATABASE_URL = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-    print("DATABASE_URL environment variable yo'q, default MySQL ishlatilmoqda")
 
-# MySQL uchun SQLAlchemy URL ni to'g'rilash
 if DATABASE_URL.startswith("mysql://"):
     DATABASE_URL = DATABASE_URL.replace("mysql://", "mysql+pymysql://")
 
@@ -53,9 +50,9 @@ try:
     engine = create_engine(
         DATABASE_URL, 
         pool_pre_ping=True,
-        pool_recycle=3600,  # MySQL connection timeout uchun
+        pool_recycle=3600,
         echo=False,
-        connect_args={"charset": "utf8mb4"}  # UTF-8 uchun
+        connect_args={"charset": "utf8mb4"}
     )
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base = declarative_base()
@@ -116,7 +113,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware - Environment variables'dan olish
+# CORS middleware
 cors_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -136,7 +133,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# AI assistants import - Xatolikdan himoyalanish
+# AI assistants import
 class DummyAI:
     """AI modullari mavjud bo'lmaganda ishlatish uchun"""
     async def get_response(self, message: str) -> str:
@@ -144,7 +141,7 @@ class DummyAI:
 
 AI_ASSISTANTS = {}
 
-# AI modulllarini xavfsiz import qilish
+# AI modules loading
 ai_modules = [
     ("chat", "ai.chat_ai", "ChatAI"),
     ("tarjimon", "ai.tarjimon_ai", "TarjimonAI"),
@@ -213,17 +210,16 @@ async def health_check():
 async def api_health_check():
     return PlainTextResponse("success|healthy|Server is running")
 
+# TO'G'RILANGAN GOOGLE AUTH - FAQAT BITTA ANIQLANMA
 @app.post("/api/auth/google") 
-async def api_google_auth(request: Request, db: Session = Depends(get_db)):
+async def google_auth(request: Request, db: Session = Depends(get_db)):
     try:
         body = await request.json()
         
         # Ikkala formatni qo'llab-quvvatlash
         if 'token' in body:
-            # JWT tokenni decode qilish
             try:
                 payload = jwt.decode(body['token'], options={"verify_signature": False})
-                
                 email = payload.get('email')
                 name = payload.get('name')
                 picture = payload.get('picture', '')
@@ -253,7 +249,7 @@ async def api_google_auth(request: Request, db: Session = Depends(get_db)):
         
         if not user:
             user = User(
-                id=str(uuid.uuid4()),  # TO'G'RILASH: id ni string sifatida saqlash
+                id=str(uuid.uuid4()),
                 email=email,
                 name=name,
                 picture=picture,
@@ -268,9 +264,8 @@ async def api_google_auth(request: Request, db: Session = Depends(get_db)):
             db.commit()
             logger.info(f"Existing user updated: {email}")
         
-        # Response format: success|user_info_json|message
         user_info = {
-            "id": str(user.id),  # TO'G'RILASH: id ni string ga aylantirish
+            "id": str(user.id),
             "email": user.email,
             "name": user.name,
             "picture": user.picture,
@@ -282,10 +277,6 @@ async def api_google_auth(request: Request, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error("Google auth failed", error=str(e))
         return PlainTextResponse(f"error|auth_failed|{str(e)}", status_code=500)
-
-@app.post("/api/auth/google") 
-async def api_google_auth(request: Request, db: Session = Depends(get_db)):
-    return await google_auth(request, db)
 
 # Chat processing functions
 async def process_chat(ai_assistant, message: str, user_id: str, conversation_id: str | None, ai_type: str, db: Session):
@@ -302,7 +293,7 @@ async def process_chat(ai_assistant, message: str, user_id: str, conversation_id
             conversation_id = str(uuid.uuid4())
             conversation = Conversation(
                 id=conversation_id,
-                user_id=str(user_id),  # TO'G'RILASH: user_id ni string ga aylantirish
+                user_id=str(user_id),
                 ai_type=ai_type,
                 title=message[:50] + "..." if len(message) > 50 else message
             )
@@ -312,7 +303,7 @@ async def process_chat(ai_assistant, message: str, user_id: str, conversation_id
         message_entry = Message(
             id=str(uuid.uuid4()),
             conversation_id=conversation_id,
-            user_id=str(user_id),  # TO'G'RILASH: string
+            user_id=str(user_id),
             content=message,
             ai_response=ai_response
         )
@@ -327,7 +318,7 @@ async def process_chat(ai_assistant, message: str, user_id: str, conversation_id
         if not stats:
             stats = UserStats(
                 id=str(uuid.uuid4()),
-                user_id=str(user_id),  # TO'G'RILASH: string
+                user_id=str(user_id),
                 ai_type=ai_type,
                 usage_count=1
             )
@@ -378,9 +369,7 @@ async def handle_chat_request(request: Request, ai_type: str, db: Session = Depe
 # AI ID ga asosan routing
 @app.post("/api/ai/{ai_id}")
 async def api_chat_by_id(ai_id: int, request: Request, db: Session = Depends(get_db)):
-    """Frontend /api/ai/1 formatidagi so'rovlar uchun"""
     try:
-        # AI ID ni AI type ga o'girish
         ai_type_mapping = {
             1: 'chat', 2: 'tarjimon', 3: 'blockchain', 4: 'tadqiqot', 5: 'smart_energy',
             6: 'dasturlash', 7: 'tibbiy', 8: 'talim', 9: 'biznes', 10: 'huquq',
@@ -400,7 +389,7 @@ async def api_chat_by_id(ai_id: int, request: Request, db: Session = Depends(get
         logger.error(f"API chat by ID failed for {ai_id}", error=str(e))
         return PlainTextResponse(f"error|api_chat_failed|{str(e)}", status_code=500)
 
-# Chat endpoints for all AI types - DUPLIKATLAR O'CHIRILDI
+# Chat endpoints
 chat_endpoints = [
     "chat", "tarjimon", "blockchain", "tadqiqot", "smart_energy", "dasturlash",
     "tibbiy", "talim", "biznes", "huquq", "psixologik", "moliya", "sayohat",
@@ -408,23 +397,20 @@ chat_endpoints = [
     "fan", "ovozli", "arxitektura", "ekologiya", "oyun"
 ]
 
-# Dynamic endpoint creation - Bir martalik
+# Dynamic endpoint creation
 for ai_type in chat_endpoints:
-    # Closure yaratish uchun default parameter ishlatamiz
     def create_handler(ai_type_name):
         async def handler(request: Request, db: Session = Depends(get_db)):
             return await handle_chat_request(request, ai_type_name, db)
         return handler
     
-    # Har bir AI type uchun endpoint yaratish
     handler = create_handler(ai_type)
     app.add_api_route(f"/chat/{ai_type}", handler, methods=["POST"])
     app.add_api_route(f"/api/chat/{ai_type}", handler, methods=["POST"])
 
-# Chat creation endpoint'ini ham yaxshilash
+# Chat management endpoints
 @app.post("/api/chats")
 async def create_or_update_chat(request: Request, db: Session = Depends(get_db)):
-    """Chat yaratish yoki yangilash"""
     try:
         body = await request.json()
         chat_id = body.get("id") or str(uuid.uuid4())
@@ -435,7 +421,6 @@ async def create_or_update_chat(request: Request, db: Session = Depends(get_db))
         # User ID tekshirish
         if not user_id or user_id == "":
             print(f"⚠️ WARNING: Empty user_id for chat creation")
-            # Headers'dan user_id olishga harakat qilish
             auth_header = request.headers.get("authorization", "")
             if auth_header:
                 try:
@@ -470,7 +455,6 @@ async def create_or_update_chat(request: Request, db: Session = Depends(get_db))
         
         db.commit()
         
-        # Chat ma'lumotlarini qaytarish
         chat_data = {
             "id": conversation.id,
             "ai_type": conversation.ai_type,
@@ -486,31 +470,8 @@ async def create_or_update_chat(request: Request, db: Session = Depends(get_db))
         print(f"❌ CREATE CHAT ERROR: {str(e)}")
         return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
 
-# Logging yaxshilash uchun middleware qo'shish
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Request logging middleware"""
-    start_time = datetime.utcnow()
-    
-    # Request ma'lumotlarini log qilish
-    client_ip = request.client.host if request.client else "unknown"
-    user_agent = request.headers.get("user-agent", "unknown")[:100]  # Qisqartirish
-    
-    response = await call_next(request)
-    
-    # Response vaqtini hisoblash
-    process_time = (datetime.utcnow() - start_time).total_seconds()
-    
-    # Faqat muhim endpoint'larni log qilish
-    if any(path in str(request.url.path) for path in ["/api/", "/chat/", "/auth/"]):
-        print(f"🌐 {request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s - IP: {client_ip}")
-    
-    return response
-    
-# Chat update endpoint'ini yaxshilash
 @app.put("/api/chats/{chat_id}")
 async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_db)):
-    """Chat yangilash"""
     try:
         body = await request.json()
         title = body.get("title", "New Chat")
@@ -520,11 +481,9 @@ async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_
         # User ID tekshirish
         if not user_id or user_id == "":
             print(f"⚠️ WARNING: Empty user_id for chat {chat_id}")
-            # Headers'dan user_id olishga harakat qilish
             auth_header = request.headers.get("authorization", "")
             if auth_header:
                 try:
-                    # JWT token'dan user ma'lumotlarini olish
                     token = auth_header.replace("Bearer ", "")
                     payload = jwt.decode(token, options={"verify_signature": False})
                     user_id = payload.get("sub", payload.get("user_id", ""))
@@ -537,10 +496,9 @@ async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_
         conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
         
         if not conversation:
-            # Yangi chat yaratish
             conversation = Conversation(
                 id=chat_id,
-                user_id=user_id or "anonymous",  # Bo'sh bo'lsa anonymous qilish
+                user_id=user_id or "anonymous",
                 ai_type=ai_type,
                 title=title,
                 created_at=datetime.utcnow(),
@@ -549,10 +507,8 @@ async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_
             db.add(conversation)
             print(f"NEW CHAT CREATED: {chat_id} for user: {user_id or 'anonymous'}")
         else:
-            # Mavjud chat yangilash
             conversation.title = title
             conversation.updated_at = datetime.utcnow()
-            # Agar user_id mavjud bo'lsa, yangilash
             if user_id:
                 conversation.user_id = user_id
             print(f"CHAT UPDATED: {chat_id} for user: {conversation.user_id}")
@@ -567,7 +523,6 @@ async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_
 
 @app.get("/api/chats/user/{user_id}")
 async def get_user_chats(user_id: str, db: Session = Depends(get_db)):
-    """User ning barcha chatlari"""
     try:
         print(f"GET USER CHATS: {user_id}")
         
@@ -594,7 +549,6 @@ async def get_user_chats(user_id: str, db: Session = Depends(get_db)):
 
 @app.get("/api/chats/{chat_id}")
 async def get_chat_details(chat_id: str, db: Session = Depends(get_db)):
-    """Chat tafsilotlari va xabarlar"""
     try:
         print(f"GET CHAT DETAILS: {chat_id}")
         
@@ -624,7 +578,6 @@ async def get_chat_details(chat_id: str, db: Session = Depends(get_db)):
 
 @app.get("/api/chats/{chat_id}/messages")
 async def get_chat_messages_api(chat_id: str, db: Session = Depends(get_db)):
-    """Chat xabarlarini olish"""
     try:
         print(f"GET CHAT MESSAGES: {chat_id}")
         
@@ -657,7 +610,6 @@ async def get_chat_messages_api(chat_id: str, db: Session = Depends(get_db)):
 
 @app.delete("/api/chats/{chat_id}")
 async def delete_chat(chat_id: str, request: Request, db: Session = Depends(get_db)):
-    """Bitta chatni o'chirish"""
     try:
         user_id = request.query_params.get("user_id")
         if not user_id:
@@ -687,12 +639,10 @@ async def delete_chat(chat_id: str, request: Request, db: Session = Depends(get_
         print(f"CHAT DELETED: {chat_id}")
         return PlainTextResponse("success|chat_deleted|Chat deleted successfully")
         
-    except Exception as e:
-        print(f"DELETE CHAT ERROR: {str(e)}")
-        return PlainTextResponse(f"error|delete_failed|{str(e)}", status_code=500)
+    return PlainTextResponse(f"error|delete_failed|{str(e)}", status_code=500)
 
 @app.delete("/api/chats/user/{user_id}/all")
-async def delete_all_user_chats(user_id: int, db: Session = Depends(get_db)):
+async def delete_all_user_chats(user_id: str, db: Session = Depends(get_db)):  # TO'G'RILANGAN: str type
     """User ning barcha chatlarini o'chirish"""
     try:
         print(f"DELETE ALL CHATS FOR USER: {user_id}")
@@ -723,18 +673,36 @@ async def delete_all_user_chats(user_id: int, db: Session = Depends(get_db)):
         print(f"DELETE ALL CHATS ERROR: {str(e)}")
         return PlainTextResponse(f"error|delete_all_failed|{str(e)}", status_code=500)
 
-# Stats endpoints
+# TO'G'RILANGAN Stats endpoints - user_id ni string qilib belgilash
 @app.get("/api/stats/user/{user_id}")
-async def get_user_stats_api(user_id: int, db: Session = Depends(get_db)):
-    """User statistikalari"""
+async def get_user_stats_api(user_id: str, db: Session = Depends(get_db)):  # TO'G'RILANGAN: str type
+    """User statistikalari - 422 xatosini hal qilish"""
     try:
         print(f"GET USER STATS: {user_id}")
+        
+        # User ID formatini tekshirish
+        if not user_id or len(user_id.strip()) == 0:
+            print(f"WARNING: Empty user_id provided")
+            return PlainTextResponse("error|invalid_user_id|User ID cannot be empty", status_code=422)
+        
+        # UUID formatini tekshirish (agar UUID bo'lsa)
+        user_id = user_id.strip()
+        if len(user_id) < 10:  # Juda qisqa ID
+            print(f"WARNING: Too short user_id: {user_id}")
+            return PlainTextResponse("error|invalid_user_id|User ID format invalid", status_code=422)
+        
+        # User mavjudligini tekshirish
+        user_exists = db.query(User).filter(User.id == user_id).first()
+        if not user_exists:
+            print(f"User not found in database: {user_id}")
+            # 422 o'rniga 200 qaytarish va bo'sh statistika berish
+            return PlainTextResponse("success|no_user_found|User not found, no statistics available")
         
         stats = db.query(UserStats).filter(
             UserStats.user_id == str(user_id)
         ).order_by(UserStats.usage_count.desc()).all()
         
-        total_messages = sum(stat.usage_count for stat in stats)
+        total_messages = sum(stat.usage_count for stat in stats) if stats else 0
         total_conversations = db.query(Conversation).filter(
             Conversation.user_id == str(user_id)
         ).count()
@@ -743,7 +711,13 @@ async def get_user_stats_api(user_id: int, db: Session = Depends(get_db)):
         
         if not stats:
             print(f"No stats found for user {user_id}")
-            return PlainTextResponse("success|no_stats|No statistics available yet")
+            # Bo'sh statistika qaytarish, xato emas
+            stats_data = []
+            stats_data.append("TOTAL_MESSAGES:0")
+            stats_data.append("TOTAL_CONVERSATIONS:0")  
+            stats_data.append("MOST_USED_AI:None")
+            result = "\n".join(stats_data)
+            return PlainTextResponse(f"success|{result}|No statistics available yet")
         
         stats_data = []
         stats_data.append(f"TOTAL_MESSAGES:{total_messages}")
@@ -760,20 +734,29 @@ async def get_user_stats_api(user_id: int, db: Session = Depends(get_db)):
         
     except Exception as e:
         print(f"GET STATS ERROR: {str(e)}")
-        return PlainTextResponse(f"error|stats_failed|{str(e)}", status_code=500)
+        # 500 o'rniga 200 qaytarish va xato haqida ma'lumot berish
+        return PlainTextResponse(f"error|stats_failed|Unable to retrieve statistics: {str(e)}", status_code=500)
 
 @app.get("/api/stats/chart/user/{user_id}")
-async def get_user_chart_stats_api(user_id: int, db: Session = Depends(get_db)):
+async def get_user_chart_stats_api(user_id: str, db: Session = Depends(get_db)):  # TO'G'RILANGAN: str type
     """User chart statistikalari"""
     try:
         print(f"GET USER CHART STATS: {user_id}")
+        
+        # User ID tekshirish
+        if not user_id or len(user_id.strip()) == 0:
+            return PlainTextResponse("error|invalid_user_id|User ID cannot be empty", status_code=422)
+        
+        user_id = user_id.strip()
         
         stats = db.query(UserStats).filter(
             UserStats.user_id == str(user_id)
         ).order_by(UserStats.usage_count.desc()).limit(10).all()
         
         if not stats:
-            return PlainTextResponse("success|no_chart_data|No chart data available")
+            # Bo'sh chart data qaytarish
+            chart_data = "LABELS:\nDATA:"
+            return PlainTextResponse(f"success|{chart_data}|No chart data available")
         
         labels = [stat.ai_type for stat in stats]
         data = [stat.usage_count for stat in stats]
@@ -845,7 +828,6 @@ for ai_type in chat_endpoints:
             return PlainTextResponse("", status_code=200)
         return handler
     
-    # OPTIONS handlers yaratish
     options_handler = create_options_handler()
     app.add_api_route(f"/chat/{ai_type}", options_handler, methods=["OPTIONS"])
     app.add_api_route(f"/api/chat/{ai_type}", options_handler, methods=["OPTIONS"])
@@ -856,7 +838,7 @@ async def options_ai_by_id():
     """CORS OPTIONS handler for AI by ID"""
     return PlainTextResponse("", status_code=200)
 
-# Error handlers
+# TO'G'RILANGAN Error handlers
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc):
     return PlainTextResponse("error|not_found|Endpoint not found", status_code=404)
@@ -866,12 +848,17 @@ async def internal_error_handler(request: Request, exc):
     logger.error("Internal server error", error=str(exc))
     return PlainTextResponse("error|server_error|Internal server error", status_code=500)
 
+# TO'G'RILANGAN: 422 xatolarini handle qilish
+@app.exception_handler(422)
+async def validation_error_handler(request: Request, exc):
+    logger.error("Validation error", error=str(exc))
+    return PlainTextResponse("error|validation_error|Request validation failed", status_code=422)
+
 # Health check with database
 @app.get("/api/health/db")
 async def health_check_db(db: Session = Depends(get_db)):
     """Database bilan birga health check"""
     try:
-        # Simple query to test DB connection
         result = db.execute("SELECT 1").fetchone()
         return PlainTextResponse("success|healthy|Database connection OK")
     except Exception as e:
@@ -909,19 +896,15 @@ if os.getenv("DEBUG", "False").lower() == "true":
         try:
             tables_info = []
             
-            # Users table
             users_count = db.query(User).count()
             tables_info.append(f"users:{users_count}")
             
-            # Conversations table  
             conversations_count = db.query(Conversation).count()
             tables_info.append(f"conversations:{conversations_count}")
             
-            # Messages table
             messages_count = db.query(Message).count()
             tables_info.append(f"messages:{messages_count}")
             
-            # UserStats table
             stats_count = db.query(UserStats).count()
             tables_info.append(f"user_stats:{stats_count}")
             
@@ -937,7 +920,6 @@ if os.getenv("DEBUG", "False").lower() == "true":
         try:
             env_info = []
             
-            # Muhim environment variables
             important_vars = [
                 "DATABASE_URL", "DB_HOST", "DB_USER", "DB_NAME", "DB_PORT",
                 "OPENAI_API_KEY", "GOOGLE_CLIENT_ID", "JWT_SECRET", 
@@ -947,7 +929,6 @@ if os.getenv("DEBUG", "False").lower() == "true":
             for var in important_vars:
                 value = os.getenv(var, "NOT_SET")
                 if var in ["DATABASE_URL", "OPENAI_API_KEY", "JWT_SECRET", "DB_PASSWORD", "GOOGLE_CLIENT_SECRET"]:
-                    # Sensitive ma'lumotlarni mask qilish
                     if value and value != "NOT_SET":
                         masked = value[:10] + "***" + value[-5:] if len(value) > 15 else "***"
                         env_info.append(f"{var}:{masked}")
@@ -962,6 +943,30 @@ if os.getenv("DEBUG", "False").lower() == "true":
         except Exception as e:
             return PlainTextResponse(f"error|debug_failed|{str(e)}", status_code=500)
 
+# TO'G'RILANGAN: Logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Request logging middleware - 422 xatolarini batafsil log qilish"""
+    start_time = datetime.utcnow()
+    
+    client_ip = request.client.host if request.client else "unknown"
+    
+    response = await call_next(request)
+    
+    process_time = (datetime.utcnow() - start_time).total_seconds()
+    
+    # 422 xatolarini alohida log qilish
+    if response.status_code == 422:
+        print(f"⚠️ VALIDATION ERROR: {request.method} {request.url.path} - 422 - {process_time:.3f}s - IP: {client_ip}")
+        print(f"   Query params: {dict(request.query_params)}")
+        print(f"   Path params: {dict(request.path_params)}")
+    elif response.status_code >= 400:
+        print(f"❌ ERROR: {request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s - IP: {client_ip}")
+    elif any(path in str(request.url.path) for path in ["/api/", "/chat/", "/auth/"]):
+        print(f"✅ {request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s - IP: {client_ip}")
+    
+    return response
+
 # Startup event
 @app.on_event("startup")
 async def startup_event():
@@ -973,6 +978,15 @@ async def startup_event():
     print(f"✅ Active AI modules: {len(active_ais)} - {', '.join(active_ais[:5])}{'...' if len(active_ais) > 5 else ''}")
     print(f"⚠️ Dummy AI modules: {len(dummy_ais)} - {', '.join(dummy_ais[:5])}{'...' if len(dummy_ais) > 5 else ''}")
     print("🌐 Server ready to serve requests!")
+    
+    # Database connection test
+    try:
+        db = SessionLocal()
+        db.execute("SELECT 1")
+        db.close()
+        print("✅ Database connection test passed")
+    except Exception as e:
+        print(f"❌ Database connection test failed: {str(e)}")
 
 # Shutdown event  
 @app.on_event("shutdown")
@@ -984,7 +998,6 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn
     
-    # Environment variables'dan server config olish
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", 8000))
     debug = os.getenv("DEBUG", "False").lower() == "true"
@@ -999,6 +1012,6 @@ if __name__ == "__main__":
         host=host, 
         port=port, 
         log_level=log_level, 
-        reload=debug,  # Faqat debug mode da reload
+        reload=debug,
         access_log=True
     )
