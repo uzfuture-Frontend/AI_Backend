@@ -724,31 +724,7 @@ async def api_get_conversations(user_id: str, db: Session = Depends(get_db)):
     return await get_user_chats(int(user_id), db)
 
 
-# Chart stats ham kerak bo'lsa
-@app.get("/api/stats/chart/user/{user_id}")
-async def get_user_chart_stats_api(user_id: int, db: Session = Depends(get_db)):
-    """User chart statistikalari"""
-    try:
-        print(f"🔍 GET USER CHART STATS: {user_id}")
-        
-        stats = db.query(UserStats).filter(
-            UserStats.user_id == str(user_id)
-        ).order_by(UserStats.usage_count.desc()).limit(10).all()
-        
-        if not stats:
-            return PlainTextResponse("success|no_chart_data|No chart data available")
-        
-        # Chart uchun ma'lumot
-        labels = [stat.ai_type for stat in stats]
-        data = [stat.usage_count for stat in stats]
-        
-        chart_data = f"LABELS:{','.join(labels)}\nDATA:{','.join(map(str, data))}"
-        
-        return PlainTextResponse(f"success|{chart_data}|Chart data retrieved")
-        
-    except Exception as e:
-        print(f"❌ GET CHART STATS ERROR: {str(e)}")
-        return PlainTextResponse(f"error|chart_failed|{str(e)}", status_code=500)
+
 
 # Main.py ga qo'shing - DELETE ENDPOINTS
 
