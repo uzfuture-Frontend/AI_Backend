@@ -16,27 +16,32 @@ import json
 # Load environment variables
 load_dotenv()
 
-print("🔍 DEBUG: Environment variables:")
-print(f"OPENAI_API_KEY mavjud: {'✅' if os.getenv('OPENAI_API_KEY') else '❌'}")
-if os.getenv('OPENAI_API_KEY'):
-    print(f"OPENAI_API_KEY uzunligi: {len(os.getenv('OPENAI_API_KEY'))}")
-    print(f"OPENAI_API_KEY boshi: {os.getenv('OPENAI_API_KEY')[:20]}...")
+print("🔍 DEBUGGING ENVIRONMENT VARIABLES:")
+print(f"All env vars count: {len(os.environ)}")
 
-# Barcha environment variables
-print("Barcha env vars:")
-for key, value in os.environ.items():
-    if 'OPENAI' in key:
-        print(f"{key}: {value[:20] if value else 'None'}...")
+# OPENAI variables tekshirish
+openai_vars = {k: v for k, v in os.environ.items() if 'OPENAI' in k}
+print(f"OPENAI related vars: {openai_vars}")
+
+# Direct check
+api_key = os.getenv("OPENAI_API_KEY")
+print(f"OPENAI_API_KEY direct: {'✅ Found' if api_key else '❌ Not found'}")
+if api_key:
+    print(f"Length: {len(api_key)}")
+    print(f"Starts with: {api_key[:10]}...")
+
+# Try OpenAI client
+try:
+    if api_key:
+        client = OpenAI(api_key=api_key)
+        print("✅ OpenAI client created successfully")
+    else:
+        print("❌ No API key found for OpenAI client")
+except Exception as e:
+    print(f"❌ OpenAI client error: {e}")
 
 # OpenAI client setup
-api_key = os.getenv("OPENAI_API_KEY")
-if api_key:
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key)
-    print("✅ OpenAI client yaratildi")
-else:
-    client = None
-    print("❌ OPENAI_API_KEY topilmadi!")
+
 
 # Logger
 logger = structlog.get_logger()
