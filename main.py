@@ -102,17 +102,18 @@ app = FastAPI(
 
 # CORS middleware
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://www.aiuniverse.uz",
-        "https://www.aiuniverse.uz",
-        "http://aiuniverse.uz", 
-        "https://aiuniverse.uz",
-        "https://*.railway.app"
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+  CORSMiddleware,
+  allow_origins=[
+      "http://localhost:5173",  # Qo'shish: Frontend dev
+      "http://www.aiuniverse.uz",
+      "https://www.aiuniverse.uz",
+      "http://aiuniverse.uz", 
+      "https://aiuniverse.uz",
+      "https://*.railway.app"
+  ],
+  allow_credentials=True,
+  allow_methods=["*"],
+  allow_headers=["*"],
 )
 
 # AI assistants import - Xatolikdan himoyalanish
@@ -438,7 +439,7 @@ async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_
         return PlainTextResponse(f"error|update_failed|{str(e)}", status_code=500)
 
 @app.get("/api/chats/user/{user_id}")
-async def get_user_chats(user_id: int, db: Session = Depends(get_db)):
+async  def get_user_chats(user_id: str, db: Session = Depends(get_db)):
     """User ning barcha chatlari"""
     try:
         print(f"GET USER CHATS: {user_id}")
