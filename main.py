@@ -610,6 +610,7 @@ async def get_chat_messages_api(chat_id: str, db: Session = Depends(get_db)):
 
 @app.delete("/api/chats/{chat_id}")
 async def delete_chat(chat_id: str, request: Request, db: Session = Depends(get_db)):
+    """Bitta chatni o'chirish"""
     try:
         user_id = request.query_params.get("user_id")
         if not user_id:
@@ -639,7 +640,9 @@ async def delete_chat(chat_id: str, request: Request, db: Session = Depends(get_
         print(f"CHAT DELETED: {chat_id}")
         return PlainTextResponse("success|chat_deleted|Chat deleted successfully")
         
-    return PlainTextResponse(f"error|delete_failed|{str(e)}", status_code=500)
+    except Exception as e:  # BU QATOR YO'Q EDI
+        print(f"DELETE CHAT ERROR: {str(e)}")
+        return PlainTextResponse(f"error|delete_failed|{str(e)}", status_code=500)
 
 @app.delete("/api/chats/user/{user_id}/all")
 async def delete_all_user_chats(user_id: str, db: Session = Depends(get_db)):  # TO'G'RILANGAN: str type
