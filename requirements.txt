@@ -19,7 +19,7 @@ python-multipart==0.0.6
 httpx==0.25.2
 
 # AI Integration
-openai==0.28
+openai>=1.0.0
 
 # Environment Variables
 python-dotenv==1.0.0

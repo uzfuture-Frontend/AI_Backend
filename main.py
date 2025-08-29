@@ -8,24 +8,24 @@ import os
 from dotenv import load_dotenv
 import uuid
 import structlog
-import openai
+from openai import OpenAI  # Yangi import
 import jwt
 import json
 
 # Load environment variables
 load_dotenv()
 
-# OpenAI global config
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# OpenAI yangi client yaratish
 api_key = os.getenv("OPENAI_API_KEY")
 print(f"DEBUG: API Key mavjud: {api_key is not None}")
 print(f"DEBUG: API Key uzunligi: {len(api_key) if api_key else 0}")
 print(f"DEBUG: API Key boshlanishi: {api_key[:15] if api_key else 'None'}...")
 
 if api_key:
-    openai.api_key = api_key
-    print("✅ OpenAI API key o'rnatildi")
+    openai_client = OpenAI(api_key=api_key)  # Yangi client
+    print("✅ OpenAI client yaratildi")
 else:
+    openai_client = None
     print("❌ OPENAI_API_KEY environment variable topilmadi!")
 
 # Logger
