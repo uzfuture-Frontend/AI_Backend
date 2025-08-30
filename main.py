@@ -1,9 +1,9 @@
-# TO'G'RILANGAN BACKEND MAIN.PY
-from fastapi import FastAPI, Depends, Request
+from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer
+from fastapi.responses import PlainTextResponse, JSONResponse
+from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 import os
 from dotenv import load_dotenv
@@ -39,9 +39,6 @@ try:
         print("❌ No API key found for OpenAI client")
 except Exception as e:
     print(f"❌ OpenAI client error: {e}")
-
-# OpenAI client setup
-
 
 # Logger
 logger = structlog.get_logger()
@@ -208,9 +205,17 @@ def get_db():
     finally:
         db.close()
 
-# Root endpoints
+# FIXED: Root endpoints - GET va POST qo'llab-quvvatlash
 @app.get("/")
 async def root():
+    return PlainTextResponse("success|AI Universe|Welcome to AI Universe Platform")
+
+@app.post("/")
+async def root_post():
+    return PlainTextResponse("success|AI Universe|Welcome to AI Universe Platform")
+
+@app.head("/")
+async def root_head():
     return PlainTextResponse("success|AI Universe|Welcome to AI Universe Platform")
 
 @app.get("/api")
@@ -225,7 +230,7 @@ async def health_check():
 async def api_health_check():
     return PlainTextResponse("success|healthy|Server is running")
 
-# TO'G'RILANGAN GOOGLE AUTH - FAQAT BITTA ANIQLANMA
+# FIXED: Google Auth - Exception handling yaxshilangan
 @app.post("/api/auth/google") 
 async def google_auth(request: Request, db: Session = Depends(get_db)):
     try:
@@ -260,24 +265,30 @@ async def google_auth(request: Request, db: Session = Depends(get_db)):
             return PlainTextResponse("error|missing_data|Email and name are required", status_code=400)
         
         # Bazadan foydalanuvchini qidirish
-        user = db.query(User).filter(User.email == email).first()
-        
-        if not user:
-            user = User(
-                id=str(uuid.uuid4()),
-                email=email,
-                name=name,
-                picture=picture,
-                created_at=datetime.utcnow()
-            )
-            db.add(user)
-            db.commit()
-            logger.info(f"New user created: {email}")
-        else:
-            user.name = name
-            user.picture = picture
-            db.commit()
-            logger.info(f"Existing user updated: {email}")
+        try:
+            user = db.query(User).filter(User.email == email).first()
+            
+            if not user:
+                user = User(
+                    id=str(uuid.uuid4()),
+                    email=email,
+                    name=name,
+                    picture=picture,
+                    created_at=datetime.utcnow()
+                )
+                db.add(user)
+                db.commit()
+                db.refresh(user)
+                logger.info(f"New user created: {email}")
+            else:
+                user.name = name
+                user.picture = picture
+                db.commit()
+                logger.info(f"Existing user updated: {email}")
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"Database error in auth: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Database operation failed", status_code=500)
         
         user_info = {
             "id": str(user.id),
@@ -289,11 +300,13 @@ async def google_auth(request: Request, db: Session = Depends(get_db)):
         
         return PlainTextResponse(f"success|{json.dumps(user_info)}|User authenticated successfully")
         
+    except json.JSONDecodeError:
+        return PlainTextResponse("error|invalid_json|Invalid JSON data", status_code=400)
     except Exception as e:
         logger.error("Google auth failed", error=str(e))
         return PlainTextResponse(f"error|auth_failed|{str(e)}", status_code=500)
 
-# Chat processing functions
+# FIXED: Chat processing with better error handling
 async def process_chat(ai_assistant, message: str, user_id: str, conversation_id: str | None, ai_type: str, db: Session):
     try:
         if not user_id:
@@ -303,54 +316,60 @@ async def process_chat(ai_assistant, message: str, user_id: str, conversation_id
         
         ai_response = await ai_assistant.get_response(message)
         
-        # Yangi suhbat yaratish
-        if not conversation_id:
-            conversation_id = str(uuid.uuid4())
-            conversation = Conversation(
-                id=conversation_id,
-                user_id=str(user_id),
-                ai_type=ai_type,
-                title=message[:50] + "..." if len(message) > 50 else message
-            )
-            db.add(conversation)
-        
-        # Xabarni saqlash
-        message_entry = Message(
-            id=str(uuid.uuid4()),
-            conversation_id=conversation_id,
-            user_id=str(user_id),
-            content=message,
-            ai_response=ai_response
-        )
-        db.add(message_entry)
-        
-        # Statistikani yangilash
-        stats = db.query(UserStats).filter(
-            UserStats.user_id == str(user_id),
-            UserStats.ai_type == ai_type
-        ).first()
-        
-        if not stats:
-            stats = UserStats(
+        try:
+            # Yangi suhbat yaratish
+            if not conversation_id:
+                conversation_id = str(uuid.uuid4())
+                conversation = Conversation(
+                    id=conversation_id,
+                    user_id=str(user_id),
+                    ai_type=ai_type,
+                    title=message[:50] + "..." if len(message) > 50 else message
+                )
+                db.add(conversation)
+            
+            # Xabarni saqlash
+            message_entry = Message(
                 id=str(uuid.uuid4()),
+                conversation_id=conversation_id,
                 user_id=str(user_id),
-                ai_type=ai_type,
-                usage_count=1
+                content=message,
+                ai_response=ai_response
             )
-            db.add(stats)
-        else:
-            stats.usage_count += 1
-            stats.last_used = datetime.utcnow()
-        
-        # Suhbat vaqtini yangilash
-        if conversation_id:
-            conversation = db.query(Conversation).filter(
-                Conversation.id == conversation_id
+            db.add(message_entry)
+            
+            # Statistikani yangilash
+            stats = db.query(UserStats).filter(
+                UserStats.user_id == str(user_id),
+                UserStats.ai_type == ai_type
             ).first()
-            if conversation:
-                conversation.updated_at = datetime.utcnow()
-        
-        db.commit()
+            
+            if not stats:
+                stats = UserStats(
+                    id=str(uuid.uuid4()),
+                    user_id=str(user_id),
+                    ai_type=ai_type,
+                    usage_count=1
+                )
+                db.add(stats)
+            else:
+                stats.usage_count += 1
+                stats.last_used = datetime.utcnow()
+            
+            # Suhbat vaqtini yangilash
+            if conversation_id:
+                conversation = db.query(Conversation).filter(
+                    Conversation.id == conversation_id
+                ).first()
+                if conversation:
+                    conversation.updated_at = datetime.utcnow()
+            
+            db.commit()
+            
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"Database error in chat: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to save chat", status_code=500)
         
         return PlainTextResponse(f"success|{ai_response}|{conversation_id}")
     except Exception as e:
@@ -377,6 +396,8 @@ async def handle_chat_request(request: Request, ai_type: str, db: Session = Depe
             ai_type, 
             db
         )
+    except json.JSONDecodeError:
+        return PlainTextResponse("error|invalid_json|Invalid JSON data", status_code=400)
     except Exception as e:
         logger.error(f"Handle chat request failed for {ai_type}", error=str(e))
         return PlainTextResponse(f"error|request_failed|{str(e)}", status_code=500)
@@ -423,7 +444,7 @@ for ai_type in chat_endpoints:
     app.add_api_route(f"/chat/{ai_type}", handler, methods=["POST"])
     app.add_api_route(f"/api/chat/{ai_type}", handler, methods=["POST"])
 
-# Chat management endpoints
+# FIXED: Chat management with better database error handling
 @app.post("/api/chats")
 async def create_or_update_chat(request: Request, db: Session = Depends(get_db)):
     try:
@@ -448,27 +469,34 @@ async def create_or_update_chat(request: Request, db: Session = Depends(get_db))
         
         print(f"CREATE/UPDATE CHAT: {chat_id}, user: {user_id or 'EMPTY'}, type: {ai_type}")
         
-        conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-        
-        if not conversation:
-            conversation = Conversation(
-                id=chat_id,
-                user_id=user_id or "anonymous",
-                ai_type=ai_type,
-                title=title,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow()
-            )
-            db.add(conversation)
-            print(f"NEW CHAT CREATED: {chat_id} for user: {user_id or 'anonymous'}")
-        else:
-            conversation.title = title
-            conversation.updated_at = datetime.utcnow()
-            if user_id:
-                conversation.user_id = user_id
-            print(f"CHAT UPDATED: {chat_id} for user: {conversation.user_id}")
-        
-        db.commit()
+        try:
+            conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
+            
+            if not conversation:
+                conversation = Conversation(
+                    id=chat_id,
+                    user_id=user_id or "anonymous",
+                    ai_type=ai_type,
+                    title=title,
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow()
+                )
+                db.add(conversation)
+                print(f"NEW CHAT CREATED: {chat_id} for user: {user_id or 'anonymous'}")
+            else:
+                conversation.title = title
+                conversation.updated_at = datetime.utcnow()
+                if user_id:
+                    conversation.user_id = user_id
+                print(f"CHAT UPDATED: {chat_id} for user: {conversation.user_id}")
+            
+            db.commit()
+            db.refresh(conversation)
+            
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"Database error in create chat: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to save chat", status_code=500)
         
         chat_data = {
             "id": conversation.id,
@@ -481,6 +509,8 @@ async def create_or_update_chat(request: Request, db: Session = Depends(get_db))
         
         return PlainTextResponse(f"success|{json.dumps(chat_data)}|Chat saved successfully")
         
+    except json.JSONDecodeError:
+        return PlainTextResponse("error|invalid_json|Invalid JSON data", status_code=400)
     except Exception as e:
         print(f"❌ CREATE CHAT ERROR: {str(e)}")
         return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
@@ -508,30 +538,38 @@ async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_
         
         print(f"UPDATE CHAT: {chat_id}, user: {user_id or 'EMPTY'}, type: {ai_type}")
         
-        conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-        
-        if not conversation:
-            conversation = Conversation(
-                id=chat_id,
-                user_id=user_id or "anonymous",
-                ai_type=ai_type,
-                title=title,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow()
-            )
-            db.add(conversation)
-            print(f"NEW CHAT CREATED: {chat_id} for user: {user_id or 'anonymous'}")
-        else:
-            conversation.title = title
-            conversation.updated_at = datetime.utcnow()
-            if user_id:
-                conversation.user_id = user_id
-            print(f"CHAT UPDATED: {chat_id} for user: {conversation.user_id}")
-        
-        db.commit()
+        try:
+            conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
+            
+            if not conversation:
+                conversation = Conversation(
+                    id=chat_id,
+                    user_id=user_id or "anonymous",
+                    ai_type=ai_type,
+                    title=title,
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow()
+                )
+                db.add(conversation)
+                print(f"NEW CHAT CREATED: {chat_id} for user: {user_id or 'anonymous'}")
+            else:
+                conversation.title = title
+                conversation.updated_at = datetime.utcnow()
+                if user_id:
+                    conversation.user_id = user_id
+                print(f"CHAT UPDATED: {chat_id} for user: {conversation.user_id}")
+            
+            db.commit()
+            
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"Database error in update chat: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to update chat", status_code=500)
         
         return PlainTextResponse("success|chat_saved|Chat saved successfully")
         
+    except json.JSONDecodeError:
+        return PlainTextResponse("error|invalid_json|Invalid JSON data", status_code=400)
     except Exception as e:
         print(f"❌ UPDATE CHAT ERROR: {str(e)}")
         return PlainTextResponse(f"error|update_failed|{str(e)}", status_code=500)
@@ -541,9 +579,13 @@ async def get_user_chats(user_id: str, db: Session = Depends(get_db)):
     try:
         print(f"GET USER CHATS: {user_id}")
         
-        conversations = db.query(Conversation).filter(
-            Conversation.user_id == str(user_id)
-        ).order_by(Conversation.updated_at.desc()).all()
+        try:
+            conversations = db.query(Conversation).filter(
+                Conversation.user_id == str(user_id)
+            ).order_by(Conversation.updated_at.desc()).all()
+        except SQLAlchemyError as e:
+            logger.error(f"Database error in get chats: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to retrieve chats", status_code=500)
         
         if not conversations:
             print(f"No chats found for user {user_id}")
@@ -567,14 +609,22 @@ async def get_chat_details(chat_id: str, db: Session = Depends(get_db)):
     try:
         print(f"GET CHAT DETAILS: {chat_id}")
         
-        conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
+        try:
+            conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
+        except SQLAlchemyError as e:
+            logger.error(f"Database error in get chat details: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to retrieve chat details", status_code=500)
         
         if not conversation:
             return PlainTextResponse("error|chat_not_found|Chat not found", status_code=404)
         
-        messages = db.query(Message).filter(
-            Message.conversation_id == chat_id
-        ).order_by(Message.timestamp.asc()).all()
+        try:
+            messages = db.query(Message).filter(
+                Message.conversation_id == chat_id
+            ).order_by(Message.timestamp.asc()).all()
+        except SQLAlchemyError as e:
+            logger.error(f"Database error in get messages: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to retrieve messages", status_code=500)
         
         chat_info = f"{conversation.id}|{conversation.ai_type}|{conversation.title}|{conversation.created_at}|{conversation.updated_at}"
         
@@ -596,15 +646,23 @@ async def get_chat_messages_api(chat_id: str, db: Session = Depends(get_db)):
     try:
         print(f"GET CHAT MESSAGES: {chat_id}")
         
-        conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
+        try:
+            conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
+        except SQLAlchemyError as e:
+            logger.error(f"Database error in get chat messages: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to retrieve chat", status_code=500)
         
         if not conversation:
             print(f"Chat not found: {chat_id}")
             return PlainTextResponse("error|chat_not_found|Chat not found", status_code=404)
         
-        messages = db.query(Message).filter(
-            Message.conversation_id == chat_id
-        ).order_by(Message.timestamp.asc()).all()
+        try:
+            messages = db.query(Message).filter(
+                Message.conversation_id == chat_id
+            ).order_by(Message.timestamp.asc()).all()
+        except SQLAlchemyError as e:
+            logger.error(f"Database error in get messages: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to retrieve messages", status_code=500)
         
         if not messages:
             print(f"No messages found for chat: {chat_id}")
@@ -640,7 +698,11 @@ async def delete_chat(chat_id: str, request: Request, db: Session = Depends(get_
         if chat_id == "undefined" or not chat_id:
             return PlainTextResponse("error|invalid_chat_id|Chat ID is required", status_code=400)
         
-        conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
+        try:
+            conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
+        except SQLAlchemyError as e:
+            logger.error(f"Database error in delete chat: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to access chat", status_code=500)
         
         if not conversation:
             return PlainTextResponse("error|chat_not_found|Chat not found", status_code=404)
@@ -648,26 +710,35 @@ async def delete_chat(chat_id: str, request: Request, db: Session = Depends(get_
         if user_id and conversation.user_id != str(user_id):
             return PlainTextResponse("error|unauthorized|Unauthorized to delete this chat", status_code=403)
         
-        db.query(Message).filter(Message.conversation_id == chat_id).delete()
-        db.delete(conversation)
-        db.commit()
+        try:
+            db.query(Message).filter(Message.conversation_id == chat_id).delete()
+            db.delete(conversation)
+            db.commit()
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"Database error in delete chat: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to delete chat", status_code=500)
         
         print(f"CHAT DELETED: {chat_id}")
         return PlainTextResponse("success|chat_deleted|Chat deleted successfully")
         
-    except Exception as e:  # BU QATOR YO'Q EDI
+    except Exception as e:
         print(f"DELETE CHAT ERROR: {str(e)}")
         return PlainTextResponse(f"error|delete_failed|{str(e)}", status_code=500)
 
 @app.delete("/api/chats/user/{user_id}/all")
-async def delete_all_user_chats(user_id: str, db: Session = Depends(get_db)):  # TO'G'RILANGAN: str type
+async def delete_all_user_chats(user_id: str, db: Session = Depends(get_db)):
     """User ning barcha chatlarini o'chirish"""
     try:
         print(f"DELETE ALL CHATS FOR USER: {user_id}")
         
-        conversations = db.query(Conversation).filter(
-            Conversation.user_id == str(user_id)
-        ).all()
+        try:
+            conversations = db.query(Conversation).filter(
+                Conversation.user_id == str(user_id)
+            ).all()
+        except SQLAlchemyError as e:
+            logger.error(f"Database error in delete all chats: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to access chats", status_code=500)
         
         if not conversations:
             print(f"No chats found for user {user_id}")
@@ -675,14 +746,19 @@ async def delete_all_user_chats(user_id: str, db: Session = Depends(get_db)):  #
         
         conversation_ids = [conv.id for conv in conversations]
         
-        for conv_id in conversation_ids:
-            db.query(Message).filter(Message.conversation_id == conv_id).delete()
-        
-        db.query(Conversation).filter(
-            Conversation.user_id == str(user_id)
-        ).delete()
-        
-        db.commit()
+        try:
+            for conv_id in conversation_ids:
+                db.query(Message).filter(Message.conversation_id == conv_id).delete()
+            
+            db.query(Conversation).filter(
+                Conversation.user_id == str(user_id)
+            ).delete()
+            
+            db.commit()
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"Database error in delete all chats: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to delete chats", status_code=500)
         
         print(f"ALL CHATS DELETED FOR USER: {user_id} ({len(conversations)} chats)")
         return PlainTextResponse(f"success|all_chats_deleted|{len(conversations)} chats deleted successfully")
@@ -691,9 +767,9 @@ async def delete_all_user_chats(user_id: str, db: Session = Depends(get_db)):  #
         print(f"DELETE ALL CHATS ERROR: {str(e)}")
         return PlainTextResponse(f"error|delete_all_failed|{str(e)}", status_code=500)
 
-# TO'G'RILANGAN Stats endpoints - user_id ni string qilib belgilash
+# FIXED: Stats endpoints with better error handling
 @app.get("/api/stats/user/{user_id}")
-async def get_user_stats_api(user_id: str, db: Session = Depends(get_db)):  # TO'G'RILANGAN: str type
+async def get_user_stats_api(user_id: str, db: Session = Depends(get_db)):
     """User statistikalari - 422 xatosini hal qilish"""
     try:
         print(f"GET USER STATS: {user_id}")
@@ -703,33 +779,36 @@ async def get_user_stats_api(user_id: str, db: Session = Depends(get_db)):  # TO
             print(f"WARNING: Empty user_id provided")
             return PlainTextResponse("error|invalid_user_id|User ID cannot be empty", status_code=422)
         
-        # UUID formatini tekshirish (agar UUID bo'lsa)
+        # UUID formatini tekshirish
         user_id = user_id.strip()
-        if len(user_id) < 10:  # Juda qisqa ID
+        if len(user_id) < 10:
             print(f"WARNING: Too short user_id: {user_id}")
             return PlainTextResponse("error|invalid_user_id|User ID format invalid", status_code=422)
         
-        # User mavjudligini tekshirish
-        user_exists = db.query(User).filter(User.id == user_id).first()
-        if not user_exists:
-            print(f"User not found in database: {user_id}")
-            # 422 o'rniga 200 qaytarish va bo'sh statistika berish
-            return PlainTextResponse("success|no_user_found|User not found, no statistics available")
-        
-        stats = db.query(UserStats).filter(
-            UserStats.user_id == str(user_id)
-        ).order_by(UserStats.usage_count.desc()).all()
+        try:
+            # User mavjudligini tekshirish
+            user_exists = db.query(User).filter(User.id == user_id).first()
+            if not user_exists:
+                print(f"User not found in database: {user_id}")
+                return PlainTextResponse("success|no_user_found|User not found, no statistics available")
+            
+            stats = db.query(UserStats).filter(
+                UserStats.user_id == str(user_id)
+            ).order_by(UserStats.usage_count.desc()).all()
+            
+            total_conversations = db.query(Conversation).filter(
+                Conversation.user_id == str(user_id)
+            ).count()
+            
+        except SQLAlchemyError as e:
+            logger.error(f"Database error in get stats: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to retrieve statistics", status_code=500)
         
         total_messages = sum(stat.usage_count for stat in stats) if stats else 0
-        total_conversations = db.query(Conversation).filter(
-            Conversation.user_id == str(user_id)
-        ).count()
-        
         most_used_ai = stats[0].ai_type if stats else "None"
         
         if not stats:
             print(f"No stats found for user {user_id}")
-            # Bo'sh statistika qaytarish, xato emas
             stats_data = []
             stats_data.append("TOTAL_MESSAGES:0")
             stats_data.append("TOTAL_CONVERSATIONS:0")  
@@ -752,11 +831,10 @@ async def get_user_stats_api(user_id: str, db: Session = Depends(get_db)):  # TO
         
     except Exception as e:
         print(f"GET STATS ERROR: {str(e)}")
-        # 500 o'rniga 200 qaytarish va xato haqida ma'lumot berish
         return PlainTextResponse(f"error|stats_failed|Unable to retrieve statistics: {str(e)}", status_code=500)
 
 @app.get("/api/stats/chart/user/{user_id}")
-async def get_user_chart_stats_api(user_id: str, db: Session = Depends(get_db)):  # TO'G'RILANGAN: str type
+async def get_user_chart_stats_api(user_id: str, db: Session = Depends(get_db)):
     """User chart statistikalari"""
     try:
         print(f"GET USER CHART STATS: {user_id}")
@@ -767,12 +845,15 @@ async def get_user_chart_stats_api(user_id: str, db: Session = Depends(get_db)):
         
         user_id = user_id.strip()
         
-        stats = db.query(UserStats).filter(
-            UserStats.user_id == str(user_id)
-        ).order_by(UserStats.usage_count.desc()).limit(10).all()
+        try:
+            stats = db.query(UserStats).filter(
+                UserStats.user_id == str(user_id)
+            ).order_by(UserStats.usage_count.desc()).limit(10).all()
+        except SQLAlchemyError as e:
+            logger.error(f"Database error in get chart stats: {str(e)}")
+            return PlainTextResponse(f"error|database_error|Failed to retrieve chart statistics", status_code=500)
         
         if not stats:
-            # Bo'sh chart data qaytarish
             chart_data = "LABELS:\nDATA:"
             return PlainTextResponse(f"success|{chart_data}|No chart data available")
         
@@ -856,7 +937,7 @@ async def options_ai_by_id():
     """CORS OPTIONS handler for AI by ID"""
     return PlainTextResponse("", status_code=200)
 
-# TO'G'RILANGAN Error handlers
+# FIXED: Error handlers
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc):
     return PlainTextResponse("error|not_found|Endpoint not found", status_code=404)
@@ -866,18 +947,18 @@ async def internal_error_handler(request: Request, exc):
     logger.error("Internal server error", error=str(exc))
     return PlainTextResponse("error|server_error|Internal server error", status_code=500)
 
-# TO'G'RILANGAN: 422 xatolarini handle qilish
 @app.exception_handler(422)
 async def validation_error_handler(request: Request, exc):
     logger.error("Validation error", error=str(exc))
     return PlainTextResponse("error|validation_error|Request validation failed", status_code=422)
 
-# Health check with database
+# FIXED: Health check with database - proper text() usage
 @app.get("/api/health/db")
 async def health_check_db(db: Session = Depends(get_db)):
     """Database bilan birga health check"""
     try:
-        result = db.execute("SELECT 1").fetchone()
+        # FIXED: Use text() for raw SQL
+        result = db.execute(text("SELECT 1")).fetchone()
         return PlainTextResponse("success|healthy|Database connection OK")
     except Exception as e:
         logger.error("Database health check failed", error=str(e))
@@ -961,7 +1042,7 @@ if os.getenv("DEBUG", "False").lower() == "true":
         except Exception as e:
             return PlainTextResponse(f"error|debug_failed|{str(e)}", status_code=500)
 
-# TO'G'RILANGAN: Logging middleware
+# FIXED: Logging middleware - proper error handling
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Request logging middleware - 422 xatolarini batafsil log qilish"""
@@ -969,7 +1050,11 @@ async def log_requests(request: Request, call_next):
     
     client_ip = request.client.host if request.client else "unknown"
     
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        print(f"❌ MIDDLEWARE ERROR: {request.method} {request.url.path} - {str(e)} - IP: {client_ip}")
+        return PlainTextResponse("error|server_error|Internal server error", status_code=500)
     
     process_time = (datetime.utcnow() - start_time).total_seconds()
     
@@ -1000,7 +1085,8 @@ async def startup_event():
     # Database connection test
     try:
         db = SessionLocal()
-        db.execute("SELECT 1")
+        # FIXED: Use text() for raw SQL
+        db.execute(text("SELECT 1"))
         db.close()
         print("✅ Database connection test passed")
     except Exception as e:
