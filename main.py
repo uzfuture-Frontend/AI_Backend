@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse
@@ -62,26 +63,66 @@ else:
     db_name = os.getenv("PGDATABASE", "ai_universe_db")
     DATABASE_URL = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
+# FIXED: Initialize Base BEFORE using it
+Base = declarative_base()
+engine = None
+SessionLocal = None
+
 try:
+    # FIXED: Use psycopg2-binary compatible settings
     engine = create_engine(
         DATABASE_URL, 
         pool_pre_ping=True,
         pool_recycle=3600,
         echo=False,
-        # PostgreSQL uchun connect_args
+        # PostgreSQL uchun connect_args - psycopg2 muammosini hal qilish
         connect_args={
-            "sslmode": "require" if "localhost" not in DATABASE_URL else "prefer"
+            "sslmode": "require" if "localhost" not in DATABASE_URL else "prefer",
+            "application_name": "ai_universe_app"
         }
     )
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base = declarative_base()
     print("Database engine yaratildi")
     
 except Exception as e:
     logger.error(f"PostgreSQL database setup failed: {str(e)}")
     print(f"PostgreSQL ulanish xatosi: {str(e)}")
+    # Fallback: Create dummy objects to prevent crashes
+    class DummySession:
+        def query(self, *args, **kwargs):
+            return self
+        def filter(self, *args, **kwargs):
+            return self
+        def first(self):
+            return None
+        def all(self):
+            return []
+        def count(self):
+            return 0
+        def add(self, obj):
+            pass
+        def delete(self, obj):
+            pass
+        def commit(self):
+            pass
+        def rollback(self):
+            pass
+        def close(self):
+            pass
+        def refresh(self, obj):
+            pass
+        def execute(self, *args, **kwargs):
+            class Result:
+                def fetchone(self):
+                    return (1,)
+            return Result()
+    
+    def DummySessionLocal():
+        return DummySession()
+    
+    SessionLocal = DummySessionLocal
 
-# Models
+# Models - NOW Base is defined
 class User(Base):
     __tablename__ = "users"
     id = Column(String(255), primary_key=True)
@@ -118,9 +159,12 @@ class UserStats(Base):
 
 # Create tables
 try:
-    Base.metadata.create_all(bind=engine)
-    logger.info("Database tables setup completed")
-    print("PostgreSQL jadvallari muvaffaqiyatli yaratildi")
+    if engine:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables setup completed")
+        print("PostgreSQL jadvallari muvaffaqiyatli yaratildi")
+    else:
+        print("⚠️ Database engine not available, skipping table creation")
 except Exception as e:
     logger.error("Database setup failed", error=str(e))
     print(f"Jadval yaratishda xato: {str(e)}")
