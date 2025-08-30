@@ -1,9 +1,9 @@
 from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, text
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import create_engine, text
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 import os
 from dotenv import load_dotenv
@@ -45,25 +45,32 @@ except Exception as e:
 # Logger
 logger = structlog.get_logger()
 
-# Database setup - PostgreSQL (Render.com) - FIXED
+# Environment'dan URL olish
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Render.com PostgreSQL URL format ni tekshirish
-if DATABASE_URL:
-    print(f"Database URL configured: {DATABASE_URL.split('@')[0]}@***")
+if DATABASE_URL and "postgresql" in DATABASE_URL:
+    # PostgreSQL connection
+    if DATABASE_URL.startswith("postgresql://"):
+        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
     
-    # PostgreSQL URL format ni to'g'rilash
-    if DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
+    engine = create_engine(DATABASE_URL)
+    print(f"✅ PostgreSQL connected: {DATABASE_URL.split('@')[1].split('/')[0]}")
+    
+    # Test connection
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT version()"))
+            version = result.fetchone()[0]
+            print(f"✅ PostgreSQL version: {version[:50]}...")
+    except Exception as e:
+        print(f"❌ PostgreSQL connection error: {e}")
+        
 else:
-    # Fallback konfiguratsiya
-    db_user = os.getenv("PGUSER", "ai_universe_db_user")
-    db_password = os.getenv("PGPASSWORD", "")
-    db_host = os.getenv("PGHOST", "localhost")
-    db_port = os.getenv("PGPORT", "5432")
-    db_name = os.getenv("PGDATABASE", "ai_universe_db")
-    DATABASE_URL = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-
+    # SQLite fallback
+    DATABASE_URL = "sqlite:///./ai_universe.db"
+    engine = create_engine(DATABASE_URL)
+    print("⚠️ Using SQLite fallback")
+    
 # FIXED: Initialize Base BEFORE using it
 Base = declarative_base()
 engine = None

@@ -6,8 +6,9 @@ fastapi==0.104.1
 uvicorn[standard]==0.24.0
 
 # Database - FIXED: PostgreSQL uchun to'g'ri versiya
-sqlalchemy>=2.0.35
 psycopg2-binary==2.9.7
+asyncpg==0.28.0
+sqlalchemy[postgresql]==2.0.23
 
 # Authentication & Security
 PyJWT==2.8.0
