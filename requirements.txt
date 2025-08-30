@@ -1,46 +1,46 @@
 # AI Universe Backend Dependencies
 # Bismillah - Professional AI Platform
 
-# Web Framework - FIXED versions for Python 3.11
-fastapi==0.110.0
-uvicorn[standard]==0.27.0
+# Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
 
-# Database - Python 3.11 compatible versions
-psycopg2-binary==2.9.9
-asyncpg==0.29.0
-sqlalchemy[postgresql]==2.0.27
+# Database - FIXED: PostgreSQL uchun to'g'ri versiya
+psycopg2-binary==2.9.7
+asyncpg>=0.29.0
+sqlalchemy[postgresql]==2.0.25
 
 # Authentication & Security
 PyJWT==2.8.0
 passlib[bcrypt]==1.7.4
-python-multipart==0.0.7
+python-multipart==0.0.6
 
 # HTTP Client
-httpx==0.26.0
+httpx==0.25.2
 
 # AI Integration
-openai>=1.12.0
+openai>=1.0.0
 
 # Environment Variables
-python-dotenv==1.0.1
+python-dotenv==1.0.0
 
 # Email Support
 emails==0.6
 
 # Development Tools
-pytest==8.0.0
-black==24.2.0
-isort==5.13.2
+pytest==7.4.3
+black==23.11.0
+isort==5.12.0
 
 # Production Server
 gunicorn==21.2.0
 
 # Monitoring & Logging
-structlog==24.1.0
+structlog==23.2.0
 
 # Additional Utilities
-numpy>=1.26.4
-pandas>=2.2.0
+numpy>=1.26.0
+pandas>=2.1.3
 python-jose[cryptography]==3.3.0
 
 # Password Hashing
@@ -50,7 +50,7 @@ bcrypt==4.1.2
 python-dateutil==2.8.2
 
 # HTTP Status Codes
-starlette==0.36.3
+starlette==0.27.0
 
 # Database Migrations
 alembic==1.13.1
@@ -61,11 +61,11 @@ redis==5.0.1
 # File Upload Support
 aiofiles==23.2.1
 
-# Image Processing
-Pillow>=10.2.0
+# Image Processing - FIXED: Python 3.13 uchun mos versiya
+Pillow>=10.4.0
 
 # Text Processing
 nltk==3.8.1
 
 # Timezone Support
-pytz==2024.1
+pytz==2023.3
