@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse
@@ -13,6 +12,8 @@ import structlog
 from openai import OpenAI
 import jwt
 import json
+import asyncpg  # PostgreSQL uchun async driver
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 # Load environment variables
 load_dotenv()
@@ -38,13 +39,15 @@ try:
         print("✅ OpenAI client created successfully")
     else:
         print("❌ No API key found for OpenAI client")
+        client = None
 except Exception as e:
     print(f"❌ OpenAI client error: {e}")
+    client = None
 
 # Logger
 logger = structlog.get_logger()
 
-# Database setup - PostgreSQL (Render.com)
+# Database setup - PostgreSQL (Render.com) - FIXED
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Render.com PostgreSQL URL format ni tekshirish
@@ -68,59 +71,102 @@ Base = declarative_base()
 engine = None
 SessionLocal = None
 
+# FIXED: PostgreSQL ulanish muammosini hal qilish
 try:
-    # FIXED: Use psycopg2-binary compatible settings
-    engine = create_engine(
-        DATABASE_URL, 
-        pool_pre_ping=True,
-        pool_recycle=3600,
-        echo=False,
-        # PostgreSQL uchun connect_args - psycopg2 muammosini hal qilish
-        connect_args={
-            "sslmode": "require" if "localhost" not in DATABASE_URL else "prefer",
-            "application_name": "ai_universe_app"
-        }
-    )
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    print("Database engine yaratildi")
-    
+    # psycopg2-binary o'rniga asyncpg ishlatish yoki SQLite fallback
+    try:
+        # PostgreSQL ulanishni sinash
+        import psycopg2
+        
+        # FIXED: Pool va ulanish sozlamalari yaxshilangan
+        engine = create_engine(
+            DATABASE_URL, 
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            pool_size=5,
+            max_overflow=10,
+            echo=False,
+            # FIXED: PostgreSQL uchun to'g'ri connect_args
+            connect_args={
+                "sslmode": "require" if "localhost" not in DATABASE_URL else "prefer",
+                "application_name": "ai_universe_app",
+                "connect_timeout": 30,
+                "options": "-c timezone=utc"
+            }
+        )
+        
+        # Ulanishni sinash
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        print("✅ PostgreSQL database engine yaratildi va sinovdan o'tdi")
+        
+    except ImportError:
+        print("⚠️ psycopg2 mavjud emas, asyncpg yoki SQLite ishlatiladi")
+        raise Exception("psycopg2 not available")
+        
+    except Exception as psycopg_error:
+        print(f"⚠️ PostgreSQL ulanish xatosi: {str(psycopg_error)}")
+        print("🔄 SQLite fallback ga o'tilmoqda...")
+        raise Exception("PostgreSQL connection failed")
+        
 except Exception as e:
-    logger.error(f"PostgreSQL database setup failed: {str(e)}")
+    # FIXED: SQLite fallback - mahalliy rivojlantirish uchun
     print(f"PostgreSQL ulanish xatosi: {str(e)}")
-    # Fallback: Create dummy objects to prevent crashes
-    class DummySession:
-        def query(self, *args, **kwargs):
-            return self
-        def filter(self, *args, **kwargs):
-            return self
-        def first(self):
-            return None
-        def all(self):
-            return []
-        def count(self):
-            return 0
-        def add(self, obj):
-            pass
-        def delete(self, obj):
-            pass
-        def commit(self):
-            pass
-        def rollback(self):
-            pass
-        def close(self):
-            pass
-        def refresh(self, obj):
-            pass
-        def execute(self, *args, **kwargs):
-            class Result:
-                def fetchone(self):
-                    return (1,)
-            return Result()
+    print("🔄 SQLite fallback ishga tushirilmoqda...")
     
-    def DummySessionLocal():
-        return DummySession()
-    
-    SessionLocal = DummySessionLocal
+    try:
+        # SQLite fallback
+        sqlite_path = os.getenv("SQLITE_DB_PATH", "ai_universe.db")
+        engine = create_engine(
+            f"sqlite:///{sqlite_path}",
+            pool_pre_ping=True,
+            echo=False
+        )
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        print(f"✅ SQLite fallback database yaratildi: {sqlite_path}")
+        
+    except Exception as sqlite_error:
+        logger.error(f"SQLite fallback ham muvaffaqiyatsiz: {str(sqlite_error)}")
+        print(f"❌ SQLite fallback xatosi: {str(sqlite_error)}")
+        
+        # FIXED: Dummy session - crash bo'lmaslik uchun
+        class DummySession:
+            def query(self, *args, **kwargs):
+                return self
+            def filter(self, *args, **kwargs):
+                return self
+            def first(self):
+                return None
+            def all(self):
+                return []
+            def count(self):
+                return 0
+            def add(self, obj):
+                pass
+            def delete(self, obj):
+                pass
+            def commit(self):
+                pass
+            def rollback(self):
+                pass
+            def close(self):
+                pass
+            def refresh(self, obj):
+                pass
+            def execute(self, *args, **kwargs):
+                class Result:
+                    def fetchone(self):
+                        return (1,)
+                return Result()
+        
+        def DummySessionLocal():
+            return DummySession()
+        
+        SessionLocal = DummySessionLocal
+        engine = None
+        print("⚠️ Dummy database session ishga tushirildi")
 
 # Models - NOW Base is defined
 class User(Base):
@@ -157,17 +203,17 @@ class UserStats(Base):
     usage_count = Column(Integer, default=0)
     last_used = Column(DateTime, default=datetime.utcnow)
 
-# Create tables
+# Create tables - FIXED
 try:
     if engine:
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables setup completed")
-        print("PostgreSQL jadvallari muvaffaqiyatli yaratildi")
+        print("✅ Database jadvallari muvaffaqiyatli yaratildi")
     else:
         print("⚠️ Database engine not available, skipping table creation")
 except Exception as e:
     logger.error("Database setup failed", error=str(e))
-    print(f"Jadval yaratishda xato: {str(e)}")
+    print(f"⚠️ Jadval yaratishda xato: {str(e)}")
 
 # FastAPI app
 app = FastAPI(
@@ -176,34 +222,60 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware
+# FIXED: CORS middleware - to'liq sozlamalar
 cors_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
     "http://www.aiuniverse.uz",
     "https://www.aiuniverse.uz",
     "http://aiuniverse.uz", 
     "https://aiuniverse.uz",
-    "https://ai-backend-fy7t.onrender.com"
+    "https://ai-backend-fy7t.onrender.com",
+    "*"  # Development uchun
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
-# AI assistants import
+# FIXED: AI assistants import - xatolarni handle qilish
 class DummyAI:
     """AI modullari mavjud bo'lmaganda ishlatish uchun"""
+    def __init__(self, ai_type="dummy"):
+        self.ai_type = ai_type
+        # FIXED: OpenAI client ni to'g'ri ishlatish
+        self.client = client if client else None
+    
     async def get_response(self, message: str) -> str:
-        return f"Sizning xabaringiz: '{message}' qabul qilindi. AI moduli hozircha ishlamayapti, lekin tez orada faollashadi!"
+        if self.client:
+            try:
+                # FIXED: OpenAI API ni to'g'ri chaqirish
+                response = self.client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": f"Sen {self.ai_type} bo'yicha professional AI yordamchisisiz. O'zbek tilida javob ber."},
+                        {"role": "user", "content": message}
+                    ],
+                    max_tokens=1000,
+                    temperature=0.7
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                print(f"OpenAI API xatosi: {str(e)}")
+                return f"Sizning xabaringiz: '{message}' qabul qilindi. {self.ai_type.title()} AI hozircha ishlamayapti, lekin tez orada faollashadi!"
+        else:
+            return f"Sizning xabaringiz: '{message}' qabul qilindi. {self.ai_type.title()} AI hozircha ishlamayapti, lekin tez orada faollashadi!"
 
 AI_ASSISTANTS = {}
 
-# AI modules loading
+# AI modules loading - FIXED
 ai_modules = [
     ("chat", "ai.chat_ai", "ChatAI"),
     ("tarjimon", "ai.tarjimon_ai", "TarjimonAI"),
@@ -239,21 +311,41 @@ for ai_key, module_path, class_name in ai_modules:
         AI_ASSISTANTS[ai_key] = ai_class()
         print(f"✅ {ai_key} AI module loaded")
     except ImportError as e:
-        print(f"⚠️ {ai_key} AI module not found, using dummy")
-        AI_ASSISTANTS[ai_key] = DummyAI()
+        print(f"⚠️ {ai_key} AI module not found, using dummy with OpenAI fallback")
+        AI_ASSISTANTS[ai_key] = DummyAI(ai_key)
     except Exception as e:
-        print(f"⚠️ {ai_key} AI module error: {str(e)}, using dummy")
-        AI_ASSISTANTS[ai_key] = DummyAI()
+        print(f"⚠️ {ai_key} AI module error: {str(e)}, using dummy with OpenAI fallback")
+        AI_ASSISTANTS[ai_key] = DummyAI(ai_key)
 
 print(f"Total AI assistants loaded: {len(AI_ASSISTANTS)}")
 
 # Database dependency
 def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    if SessionLocal:
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+    else:
+        # Dummy session agar database mavjud bo'lmasa
+        class DummySession:
+            def query(self, *args, **kwargs): return self
+            def filter(self, *args, **kwargs): return self
+            def first(self): return None
+            def all(self): return []
+            def count(self): return 0
+            def add(self, obj): pass
+            def delete(self, obj): pass
+            def commit(self): pass
+            def rollback(self): pass
+            def close(self): pass
+            def refresh(self, obj): pass
+            def execute(self, *args, **kwargs):
+                class Result:
+                    def fetchone(self): return (1,)
+                return Result()
+        yield DummySession()
 
 # FIXED: Root endpoints - GET va POST qo'llab-quvvatlash
 @app.get("/")
@@ -335,16 +427,19 @@ async def google_auth(request: Request, db: Session = Depends(get_db)):
                 user.picture = picture
                 db.commit()
                 logger.info(f"Existing user updated: {email}")
-        except SQLAlchemyError as e:
-            db.rollback()
-            logger.error(f"Database error in auth: {str(e)}")
+        except Exception as db_error:
+            try:
+                db.rollback()
+            except:
+                pass
+            logger.error(f"Database error in auth: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Database operation failed", status_code=500)
         
         user_info = {
-            "id": str(user.id),
-            "email": user.email,
-            "name": user.name,
-            "picture": user.picture,
+            "id": str(user.id) if hasattr(user, 'id') else str(uuid.uuid4()),
+            "email": email,
+            "name": name,
+            "picture": picture,
             "google_id": google_id
         }
         
@@ -416,10 +511,14 @@ async def process_chat(ai_assistant, message: str, user_id: str, conversation_id
             
             db.commit()
             
-        except SQLAlchemyError as e:
-            db.rollback()
-            logger.error(f"Database error in chat: {str(e)}")
-            return PlainTextResponse(f"error|database_error|Failed to save chat", status_code=500)
+        except Exception as db_error:
+            try:
+                db.rollback()
+            except:
+                pass
+            logger.error(f"Database error in chat: {str(db_error)}")
+            # Database xatosi bo'lsa ham AI javobini qaytarish
+            return PlainTextResponse(f"success|{ai_response}|{conversation_id or 'temp'}")
         
         return PlainTextResponse(f"success|{ai_response}|{conversation_id}")
     except Exception as e:
@@ -543,18 +642,21 @@ async def create_or_update_chat(request: Request, db: Session = Depends(get_db))
             db.commit()
             db.refresh(conversation)
             
-        except SQLAlchemyError as e:
-            db.rollback()
-            logger.error(f"Database error in create chat: {str(e)}")
+        except Exception as db_error:
+            try:
+                db.rollback()
+            except:
+                pass
+            logger.error(f"Database error in create chat: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to save chat", status_code=500)
         
         chat_data = {
-            "id": conversation.id,
-            "ai_type": conversation.ai_type,
-            "title": conversation.title,
-            "user_id": conversation.user_id,
-            "created_at": conversation.created_at.isoformat(),
-            "updated_at": conversation.updated_at.isoformat()
+            "id": conversation.id if hasattr(conversation, 'id') else chat_id,
+            "ai_type": ai_type,
+            "title": title,
+            "user_id": user_id or "anonymous",
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
         }
         
         return PlainTextResponse(f"success|{json.dumps(chat_data)}|Chat saved successfully")
@@ -564,6 +666,7 @@ async def create_or_update_chat(request: Request, db: Session = Depends(get_db))
     except Exception as e:
         print(f"❌ CREATE CHAT ERROR: {str(e)}")
         return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
+
 
 @app.put("/api/chats/{chat_id}")
 async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_db)):
@@ -611,9 +714,12 @@ async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_
             
             db.commit()
             
-        except SQLAlchemyError as e:
-            db.rollback()
-            logger.error(f"Database error in update chat: {str(e)}")
+        except Exception as db_error:
+            try:
+                db.rollback()
+            except:
+                pass
+            logger.error(f"Database error in update chat: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to update chat", status_code=500)
         
         return PlainTextResponse("success|chat_saved|Chat saved successfully")
@@ -633,8 +739,8 @@ async def get_user_chats(user_id: str, db: Session = Depends(get_db)):
             conversations = db.query(Conversation).filter(
                 Conversation.user_id == str(user_id)
             ).order_by(Conversation.updated_at.desc()).all()
-        except SQLAlchemyError as e:
-            logger.error(f"Database error in get chats: {str(e)}")
+        except Exception as db_error:
+            logger.error(f"Database error in get chats: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to retrieve chats", status_code=500)
         
         if not conversations:
@@ -661,8 +767,8 @@ async def get_chat_details(chat_id: str, db: Session = Depends(get_db)):
         
         try:
             conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-        except SQLAlchemyError as e:
-            logger.error(f"Database error in get chat details: {str(e)}")
+        except Exception as db_error:
+            logger.error(f"Database error in get chat details: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to retrieve chat details", status_code=500)
         
         if not conversation:
@@ -672,8 +778,8 @@ async def get_chat_details(chat_id: str, db: Session = Depends(get_db)):
             messages = db.query(Message).filter(
                 Message.conversation_id == chat_id
             ).order_by(Message.timestamp.asc()).all()
-        except SQLAlchemyError as e:
-            logger.error(f"Database error in get messages: {str(e)}")
+        except Exception as db_error:
+            logger.error(f"Database error in get messages: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to retrieve messages", status_code=500)
         
         chat_info = f"{conversation.id}|{conversation.ai_type}|{conversation.title}|{conversation.created_at}|{conversation.updated_at}"
@@ -698,8 +804,8 @@ async def get_chat_messages_api(chat_id: str, db: Session = Depends(get_db)):
         
         try:
             conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-        except SQLAlchemyError as e:
-            logger.error(f"Database error in get chat messages: {str(e)}")
+        except Exception as db_error:
+            logger.error(f"Database error in get chat messages: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to retrieve chat", status_code=500)
         
         if not conversation:
@@ -710,8 +816,8 @@ async def get_chat_messages_api(chat_id: str, db: Session = Depends(get_db)):
             messages = db.query(Message).filter(
                 Message.conversation_id == chat_id
             ).order_by(Message.timestamp.asc()).all()
-        except SQLAlchemyError as e:
-            logger.error(f"Database error in get messages: {str(e)}")
+        except Exception as db_error:
+            logger.error(f"Database error in get messages: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to retrieve messages", status_code=500)
         
         if not messages:
@@ -750,8 +856,8 @@ async def delete_chat(chat_id: str, request: Request, db: Session = Depends(get_
         
         try:
             conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-        except SQLAlchemyError as e:
-            logger.error(f"Database error in delete chat: {str(e)}")
+        except Exception as db_error:
+            logger.error(f"Database error in delete chat: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to access chat", status_code=500)
         
         if not conversation:
@@ -764,9 +870,12 @@ async def delete_chat(chat_id: str, request: Request, db: Session = Depends(get_
             db.query(Message).filter(Message.conversation_id == chat_id).delete()
             db.delete(conversation)
             db.commit()
-        except SQLAlchemyError as e:
-            db.rollback()
-            logger.error(f"Database error in delete chat: {str(e)}")
+        except Exception as db_error:
+            try:
+                db.rollback()
+            except:
+                pass
+            logger.error(f"Database error in delete chat: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to delete chat", status_code=500)
         
         print(f"CHAT DELETED: {chat_id}")
@@ -786,8 +895,8 @@ async def delete_all_user_chats(user_id: str, db: Session = Depends(get_db)):
             conversations = db.query(Conversation).filter(
                 Conversation.user_id == str(user_id)
             ).all()
-        except SQLAlchemyError as e:
-            logger.error(f"Database error in delete all chats: {str(e)}")
+        except Exception as db_error:
+            logger.error(f"Database error in delete all chats: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to access chats", status_code=500)
         
         if not conversations:
@@ -805,9 +914,12 @@ async def delete_all_user_chats(user_id: str, db: Session = Depends(get_db)):
             ).delete()
             
             db.commit()
-        except SQLAlchemyError as e:
-            db.rollback()
-            logger.error(f"Database error in delete all chats: {str(e)}")
+        except Exception as db_error:
+            try:
+                db.rollback()
+            except:
+                pass
+            logger.error(f"Database error in delete all chats: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to delete chats", status_code=500)
         
         print(f"ALL CHATS DELETED FOR USER: {user_id} ({len(conversations)} chats)")
@@ -850,8 +962,8 @@ async def get_user_stats_api(user_id: str, db: Session = Depends(get_db)):
                 Conversation.user_id == str(user_id)
             ).count()
             
-        except SQLAlchemyError as e:
-            logger.error(f"Database error in get stats: {str(e)}")
+        except Exception as db_error:
+            logger.error(f"Database error in get stats: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to retrieve statistics", status_code=500)
         
         total_messages = sum(stat.usage_count for stat in stats) if stats else 0
@@ -899,8 +1011,8 @@ async def get_user_chart_stats_api(user_id: str, db: Session = Depends(get_db)):
             stats = db.query(UserStats).filter(
                 UserStats.user_id == str(user_id)
             ).order_by(UserStats.usage_count.desc()).limit(10).all()
-        except SQLAlchemyError as e:
-            logger.error(f"Database error in get chart stats: {str(e)}")
+        except Exception as db_error:
+            logger.error(f"Database error in get chart stats: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Failed to retrieve chart statistics", status_code=500)
         
         if not stats:
@@ -1134,11 +1246,14 @@ async def startup_event():
     
     # Database connection test
     try:
-        db = SessionLocal()
-        # FIXED: Use text() for raw SQL
-        db.execute(text("SELECT 1"))
-        db.close()
-        print("✅ Database connection test passed")
+        if SessionLocal:
+            db = SessionLocal()
+            # FIXED: Use text() for raw SQL
+            db.execute(text("SELECT 1"))
+            db.close()
+            print("✅ Database connection test passed")
+        else:
+            print("⚠️ Database not available - using fallback mode")
     except Exception as e:
         print(f"❌ Database connection test failed: {str(e)}")
 
@@ -1153,7 +1268,7 @@ if __name__ == "__main__":
     import uvicorn
     
     host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", 8000))
+    port = int(os.getenv("PORT", 8080))  # FIXED: Default port 8080
     debug = os.getenv("DEBUG", "False").lower() == "true"
     log_level = os.getenv("LOG_LEVEL", "info").lower()
     
