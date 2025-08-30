@@ -43,20 +43,24 @@ except Exception as e:
 # Logger
 logger = structlog.get_logger()
 
-# Database setup - MySQL
+# Database setup - PostgreSQL (Render.com)
 DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    db_user = os.getenv("DB_USER", "root")
-    db_password = os.getenv("DB_PASSWORD", "XRCcOHObEeRtWRSJzlFzyWZNltFjgjKi")
-    db_host = os.getenv("DB_HOST", "turntable.proxy.rlwy.net")
-    db_port = os.getenv("DB_PORT", "49805")
-    db_name = os.getenv("DB_NAME", "railway")
-    DATABASE_URL = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
-if DATABASE_URL.startswith("mysql://"):
-    DATABASE_URL = DATABASE_URL.replace("mysql://", "mysql+pymysql://")
-
-print(f"Database URL configured: {DATABASE_URL.split('@')[0]}@***")
+# Render.com PostgreSQL URL format ni tekshirish
+if DATABASE_URL:
+    print(f"Database URL configured: {DATABASE_URL.split('@')[0]}@***")
+    
+    # PostgreSQL URL format ni to'g'rilash
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
+else:
+    # Fallback konfiguratsiya
+    db_user = os.getenv("PGUSER", "ai_universe_db_user")
+    db_password = os.getenv("PGPASSWORD", "")
+    db_host = os.getenv("PGHOST", "localhost")
+    db_port = os.getenv("PGPORT", "5432")
+    db_name = os.getenv("PGDATABASE", "ai_universe_db")
+    DATABASE_URL = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
 try:
     engine = create_engine(
@@ -64,15 +68,18 @@ try:
         pool_pre_ping=True,
         pool_recycle=3600,
         echo=False,
-        connect_args={"charset": "utf8mb4"}
+        # PostgreSQL uchun connect_args
+        connect_args={
+            "sslmode": "require" if "localhost" not in DATABASE_URL else "prefer"
+        }
     )
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base = declarative_base()
     print("Database engine yaratildi")
     
 except Exception as e:
-    logger.error(f"MySQL database setup failed: {str(e)}")
-    print(f"MySQL ulanish xatosi: {str(e)}")
+    logger.error(f"PostgreSQL database setup failed: {str(e)}")
+    print(f"PostgreSQL ulanish xatosi: {str(e)}")
 
 # Models
 class User(Base):
@@ -113,7 +120,7 @@ class UserStats(Base):
 try:
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables setup completed")
-    print("MySQL jadvallari muvaffaqiyatli yaratildi")
+    print("PostgreSQL jadvallari muvaffaqiyatli yaratildi")
 except Exception as e:
     logger.error("Database setup failed", error=str(e))
     print(f"Jadval yaratishda xato: {str(e)}")
