@@ -12,8 +12,6 @@ import structlog
 from openai import OpenAI
 import jwt
 import json
-import asyncpg  # PostgreSQL uchun async driver
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 # Load environment variables
 load_dotenv()
