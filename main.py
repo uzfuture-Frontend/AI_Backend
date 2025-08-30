@@ -184,8 +184,7 @@ cors_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGI
     "https://www.aiuniverse.uz",
     "http://aiuniverse.uz", 
     "https://aiuniverse.uz",
-    "https://*.railway.app",
-    "https://aiuniverse-production.up.railway.app"
+    "https://ai-backend-fy7t.onrender.com"
 ]
 
 app.add_middleware(
