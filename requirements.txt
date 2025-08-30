@@ -1,14 +1,13 @@
 # AI Universe Backend Dependencies
-# Bismillah - Professional AI Platform
+# Bismillah - Professional AI Platform (SQLAlchemy siz)
 
 # Web Framework
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 
-# Database - FIXED: PostgreSQL uchun to'g'ri versiya
+# Database - Faqat PostgreSQL driver
 psycopg2-binary==2.9.7
-asyncpg>=0.29.0
-sqlalchemy[postgresql]==2.0.25
+# asyncpg>=0.29.0  # kerak bo'lsa
 
 # Authentication & Security
 PyJWT==2.8.0
@@ -52,8 +51,7 @@ python-dateutil==2.8.2
 # HTTP Status Codes
 starlette==0.27.0
 
-# Database Migrations
-alembic==1.13.1
+
 
 # Redis (for caching)
 redis==5.0.1
@@ -61,7 +59,7 @@ redis==5.0.1
 # File Upload Support
 aiofiles==23.2.1
 
-# Image Processing - FIXED: Python 3.13 uchun mos versiya
+# Image Processing
 Pillow>=10.4.0
 
 # Text Processing

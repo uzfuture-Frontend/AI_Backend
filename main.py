@@ -1,9 +1,9 @@
 from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse
-from sqlalchemy import create_engine, text
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import psycopg2.pool
 from datetime import datetime
 import os
 from dotenv import load_dotenv
@@ -12,6 +12,8 @@ import structlog
 from openai import OpenAI
 import jwt
 import json
+import threading
+from contextlib import contextmanager
 
 # Load environment variables
 load_dotenv()
@@ -45,180 +47,167 @@ except Exception as e:
 # Logger
 logger = structlog.get_logger()
 
-# Environment'dan URL olish
-DATABASE_URL = os.getenv("DATABASE_URL")
+# Database connection pool
+db_pool = None
 
-if DATABASE_URL and "postgresql" in DATABASE_URL:
-    # PostgreSQL connection
-    if DATABASE_URL.startswith("postgresql://"):
-        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
+def init_database():
+    """PostgreSQL connection pool yaratish"""
+    global db_pool
     
-    engine = create_engine(DATABASE_URL)
-    print(f"✅ PostgreSQL connected: {DATABASE_URL.split('@')[1].split('/')[0]}")
+    DATABASE_URL = os.getenv("DATABASE_URL")
     
-    # Test connection
+    if not DATABASE_URL or "postgresql" not in DATABASE_URL:
+        print("❌ PostgreSQL DATABASE_URL topilmadi")
+        return False
+    
     try:
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT version()"))
-            version = result.fetchone()[0]
-            print(f"✅ PostgreSQL version: {version[:50]}...")
+        # URL ni parse qilish
+        if DATABASE_URL.startswith("postgresql://"):
+            DATABASE_URL = DATABASE_URL.replace("postgresql://", "", 1)
+        elif DATABASE_URL.startswith("postgres://"):
+            DATABASE_URL = DATABASE_URL.replace("postgres://", "", 1)
+        
+        # URL formatini bo'lish: user:password@host:port/database
+        auth_host_db = DATABASE_URL
+        
+        if '@' in auth_host_db:
+            auth, host_db = auth_host_db.split('@', 1)
+            if ':' in auth:
+                user, password = auth.split(':', 1)
+            else:
+                user, password = auth, ""
+        else:
+            print("❌ DATABASE_URL formatida xatolik")
+            return False
+        
+        if '/' in host_db:
+            host_port, database = host_db.split('/', 1)
+            # Query parametrlarini olib tashlash
+            if '?' in database:
+                database = database.split('?')[0]
+        else:
+            print("❌ DATABASE_URL da database nomi yo'q")
+            return False
+        
+        if ':' in host_port:
+            host, port = host_port.split(':', 1)
+            port = int(port)
+        else:
+            host, port = host_port, 5432
+        
+        # Connection pool yaratish
+        db_pool = psycopg2.pool.ThreadedConnectionPool(
+            1, 20,  # min va max connections
+            host=host,
+            port=port,
+            database=database,
+            user=user,
+            password=password,
+            sslmode="require"
+        )
+        
+        print(f"✅ PostgreSQL pool yaratildi: {host}:{port}/{database}")
+        
+        # Test connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT version()")
+                version = cur.fetchone()[0]
+                print(f"✅ PostgreSQL version: {version[:50]}...")
+        
+        # Create tables
+        create_tables()
+        
+        return True
+        
     except Exception as e:
         print(f"❌ PostgreSQL connection error: {e}")
-        
-else:
-    # SQLite fallback
-    DATABASE_URL = "sqlite:///./ai_universe.db"
-    engine = create_engine(DATABASE_URL)
-    print("⚠️ Using SQLite fallback")
+        return False
+
+@contextmanager
+def get_db_connection():
+    """Database connection olish"""
+    if not db_pool:
+        raise Exception("Database pool mavjud emas")
     
-# FIXED: Initialize Base BEFORE using it
-Base = declarative_base()
-engine = None
-SessionLocal = None
-
-# FIXED: PostgreSQL ulanish muammosini hal qilish
-try:
-    # psycopg2-binary o'rniga asyncpg ishlatish yoki SQLite fallback
+    conn = None
     try:
-        # PostgreSQL ulanishni sinash
-        import psycopg2
-        
-        # FIXED: Pool va ulanish sozlamalari yaxshilangan
-        engine = create_engine(
-            DATABASE_URL, 
-            pool_pre_ping=True,
-            pool_recycle=3600,
-            pool_size=5,
-            max_overflow=10,
-            echo=False,
-            # FIXED: PostgreSQL uchun to'g'ri connect_args
-            connect_args={
-                "sslmode": "require" if "localhost" not in DATABASE_URL else "prefer",
-                "application_name": "ai_universe_app",
-                "connect_timeout": 30,
-                "options": "-c timezone=utc"
-            }
-        )
-        
-        # Ulanishni sinash
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        print("✅ PostgreSQL database engine yaratildi va sinovdan o'tdi")
-        
-    except ImportError:
-        print("⚠️ psycopg2 mavjud emas, asyncpg yoki SQLite ishlatiladi")
-        raise Exception("psycopg2 not available")
-        
-    except Exception as psycopg_error:
-        print(f"⚠️ PostgreSQL ulanish xatosi: {str(psycopg_error)}")
-        print("🔄 SQLite fallback ga o'tilmoqda...")
-        raise Exception("PostgreSQL connection failed")
-        
-except Exception as e:
-    # FIXED: SQLite fallback - mahalliy rivojlantirish uchun
-    print(f"PostgreSQL ulanish xatosi: {str(e)}")
-    print("🔄 SQLite fallback ishga tushirilmoqda...")
-    
+        conn = db_pool.getconn()
+        conn.autocommit = False
+        yield conn
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise e
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+def create_tables():
+    """Database jadvallarini yaratish"""
     try:
-        # SQLite fallback
-        sqlite_path = os.getenv("SQLITE_DB_PATH", "ai_universe.db")
-        engine = create_engine(
-            f"sqlite:///{sqlite_path}",
-            pool_pre_ping=True,
-            echo=False
-        )
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        print(f"✅ SQLite fallback database yaratildi: {sqlite_path}")
-        
-    except Exception as sqlite_error:
-        logger.error(f"SQLite fallback ham muvaffaqiyatsiz: {str(sqlite_error)}")
-        print(f"❌ SQLite fallback xatosi: {str(sqlite_error)}")
-        
-        # FIXED: Dummy session - crash bo'lmaslik uchun
-        class DummySession:
-            def query(self, *args, **kwargs):
-                return self
-            def filter(self, *args, **kwargs):
-                return self
-            def first(self):
-                return None
-            def all(self):
-                return []
-            def count(self):
-                return 0
-            def add(self, obj):
-                pass
-            def delete(self, obj):
-                pass
-            def commit(self):
-                pass
-            def rollback(self):
-                pass
-            def close(self):
-                pass
-            def refresh(self, obj):
-                pass
-            def execute(self, *args, **kwargs):
-                class Result:
-                    def fetchone(self):
-                        return (1,)
-                return Result()
-        
-        def DummySessionLocal():
-            return DummySession()
-        
-        SessionLocal = DummySessionLocal
-        engine = None
-        print("⚠️ Dummy database session ishga tushirildi")
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Users table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id VARCHAR(255) PRIMARY KEY,
+                        email VARCHAR(255) UNIQUE NOT NULL,
+                        name VARCHAR(255),
+                        picture VARCHAR(500),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Conversations table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS conversations (
+                        id VARCHAR(255) PRIMARY KEY,
+                        user_id VARCHAR(255),
+                        ai_type VARCHAR(100),
+                        title VARCHAR(500),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Messages table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id VARCHAR(255) PRIMARY KEY,
+                        conversation_id VARCHAR(255),
+                        user_id VARCHAR(255),
+                        content TEXT,
+                        ai_response TEXT,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # User stats table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_stats (
+                        id VARCHAR(255) PRIMARY KEY,
+                        user_id VARCHAR(255),
+                        ai_type VARCHAR(100),
+                        usage_count INTEGER DEFAULT 0,
+                        last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Indexlar qo'shish
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id)")
+                
+                conn.commit()
+                print("✅ Database jadvallari muvaffaqiyatli yaratildi")
+                
+    except Exception as e:
+        print(f"❌ Jadval yaratishda xato: {str(e)}")
 
-# Models - NOW Base is defined
-class User(Base):
-    __tablename__ = "users"
-    id = Column(String(255), primary_key=True)
-    email = Column(String(255), unique=True, index=True)
-    name = Column(String(255))
-    picture = Column(String(500))
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class Conversation(Base):
-    __tablename__ = "conversations"
-    id = Column(String(255), primary_key=True)
-    user_id = Column(String(255))
-    ai_type = Column(String(100))
-    title = Column(String(500))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
-
-class Message(Base):
-    __tablename__ = "messages"
-    id = Column(String(255), primary_key=True)
-    conversation_id = Column(String(255))
-    user_id = Column(String(255))
-    content = Column(Text)
-    ai_response = Column(Text)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-
-class UserStats(Base):
-    __tablename__ = "user_stats"
-    id = Column(String(255), primary_key=True)
-    user_id = Column(String(255))
-    ai_type = Column(String(100))
-    usage_count = Column(Integer, default=0)
-    last_used = Column(DateTime, default=datetime.utcnow)
-
-# Create tables - FIXED
-try:
-    if engine:
-        Base.metadata.create_all(bind=engine)
-        logger.info("Database tables setup completed")
-        print("✅ Database jadvallari muvaffaqiyatli yaratildi")
-    else:
-        print("⚠️ Database engine not available, skipping table creation")
-except Exception as e:
-    logger.error("Database setup failed", error=str(e))
-    print(f"⚠️ Jadval yaratishda xato: {str(e)}")
+# Database ni initialize qilish
+db_initialized = init_database()
 
 # FastAPI app
 app = FastAPI(
@@ -227,7 +216,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# FIXED: CORS middleware - to'liq sozlamalar
+# CORS middleware
 cors_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -238,7 +227,7 @@ cors_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGI
     "http://aiuniverse.uz", 
     "https://aiuniverse.uz",
     "https://ai-backend-fy7t.onrender.com",
-    "*"  # Development uchun
+    "*"
 ]
 
 app.add_middleware(
@@ -250,18 +239,15 @@ app.add_middleware(
     expose_headers=["*"]
 )
 
-# FIXED: AI assistants import - xatolarni handle qilish
+# AI Assistant base class
 class DummyAI:
-    """AI modullari mavjud bo'lmaganda ishlatish uchun"""
     def __init__(self, ai_type="dummy"):
         self.ai_type = ai_type
-        # FIXED: OpenAI client ni to'g'ri ishlatish
         self.client = client if client else None
     
     async def get_response(self, message: str) -> str:
         if self.client:
             try:
-                # FIXED: OpenAI API ni to'g'ri chaqirish
                 response = self.client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[
@@ -280,7 +266,7 @@ class DummyAI:
 
 AI_ASSISTANTS = {}
 
-# AI modules loading - FIXED
+# AI modules loading
 ai_modules = [
     ("chat", "ai.chat_ai", "ChatAI"),
     ("tarjimon", "ai.tarjimon_ai", "TarjimonAI"),
@@ -324,35 +310,140 @@ for ai_key, module_path, class_name in ai_modules:
 
 print(f"Total AI assistants loaded: {len(AI_ASSISTANTS)}")
 
-# Database dependency
-def get_db():
-    if SessionLocal:
-        db = SessionLocal()
-        try:
-            yield db
-        finally:
-            db.close()
-    else:
-        # Dummy session agar database mavjud bo'lmasa
-        class DummySession:
-            def query(self, *args, **kwargs): return self
-            def filter(self, *args, **kwargs): return self
-            def first(self): return None
-            def all(self): return []
-            def count(self): return 0
-            def add(self, obj): pass
-            def delete(self, obj): pass
-            def commit(self): pass
-            def rollback(self): pass
-            def close(self): pass
-            def refresh(self, obj): pass
-            def execute(self, *args, **kwargs):
-                class Result:
-                    def fetchone(self): return (1,)
-                return Result()
-        yield DummySession()
+# Database helper functions
+def create_user(email: str, name: str, picture: str = "") -> dict:
+    """Yangi foydalanuvchi yaratish"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                user_id = str(uuid.uuid4())
+                cur.execute("""
+                    INSERT INTO users (id, email, name, picture, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING *
+                """, (user_id, email, name, picture, datetime.utcnow()))
+                
+                user = cur.fetchone()
+                conn.commit()
+                return dict(user)
+    except Exception as e:
+        print(f"Create user error: {e}")
+        return None
 
-# FIXED: Root endpoints - GET va POST qo'llab-quvvatlash
+def get_user_by_email(email: str) -> dict:
+    """Email bo'yicha foydalanuvchi topish"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+                user = cur.fetchone()
+                return dict(user) if user else None
+    except Exception as e:
+        print(f"Get user error: {e}")
+        return None
+
+def update_user(email: str, name: str, picture: str = "") -> dict:
+    """Foydalanuvchi ma'lumotlarini yangilash"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    UPDATE users SET name = %s, picture = %s 
+                    WHERE email = %s
+                    RETURNING *
+                """, (name, picture, email))
+                
+                user = cur.fetchone()
+                conn.commit()
+                return dict(user) if user else None
+    except Exception as e:
+        print(f"Update user error: {e}")
+        return None
+
+def create_conversation(user_id: str, ai_type: str, title: str) -> str:
+    """Yangi suhbat yaratish"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                conversation_id = str(uuid.uuid4())
+                cur.execute("""
+                    INSERT INTO conversations (id, user_id, ai_type, title, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (conversation_id, user_id, ai_type, title, datetime.utcnow(), datetime.utcnow()))
+                
+                conn.commit()
+                return conversation_id
+    except Exception as e:
+        print(f"Create conversation error: {e}")
+        return None
+
+def save_message(conversation_id: str, user_id: str, content: str, ai_response: str):
+    """Xabar saqlash"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                message_id = str(uuid.uuid4())
+                cur.execute("""
+                    INSERT INTO messages (id, conversation_id, user_id, content, ai_response, timestamp)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (message_id, conversation_id, user_id, content, ai_response, datetime.utcnow()))
+                
+                conn.commit()
+    except Exception as e:
+        print(f"Save message error: {e}")
+
+def update_user_stats(user_id: str, ai_type: str):
+    """Foydalanuvchi statistikasini yangilash"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Mavjud statistika bormi tekshirish
+                cur.execute("""
+                    SELECT id, usage_count FROM user_stats 
+                    WHERE user_id = %s AND ai_type = %s
+                """, (user_id, ai_type))
+                
+                stat = cur.fetchone()
+                
+                if stat:
+                    # Mavjud statistikani yangilash
+                    cur.execute("""
+                        UPDATE user_stats 
+                        SET usage_count = usage_count + 1, last_used = %s
+                        WHERE user_id = %s AND ai_type = %s
+                    """, (datetime.utcnow(), user_id, ai_type))
+                else:
+                    # Yangi statistika yaratish
+                    stat_id = str(uuid.uuid4())
+                    cur.execute("""
+                        INSERT INTO user_stats (id, user_id, ai_type, usage_count, last_used)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (stat_id, user_id, ai_type, 1, datetime.utcnow()))
+                
+                conn.commit()
+    except Exception as e:
+        print(f"Update stats error: {e}")
+
+def update_conversation_timestamp(conversation_id: str):
+    """Suhbat vaqtini yangilash"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE conversations SET updated_at = %s WHERE id = %s
+                """, (datetime.utcnow(), conversation_id))
+                conn.commit()
+    except Exception as e:
+        print(f"Update conversation error: {e}")
+
+# Dependency for database check
+def get_db():
+    """Database mavjudligini tekshirish"""
+    if not db_initialized:
+        raise HTTPException(status_code=500, detail="Database not available")
+    return True
+
+# Root endpoints
 @app.get("/")
 async def root():
     return PlainTextResponse("success|AI Universe|Welcome to AI Universe Platform")
@@ -377,9 +468,9 @@ async def health_check():
 async def api_health_check():
     return PlainTextResponse("success|healthy|Server is running")
 
-# FIXED: Google Auth - Exception handling yaxshilangan
+# Google Auth endpoint
 @app.post("/api/auth/google") 
-async def google_auth(request: Request, db: Session = Depends(get_db)):
+async def google_auth(request: Request):
     try:
         body = await request.json()
         
@@ -411,37 +502,37 @@ async def google_auth(request: Request, db: Session = Depends(get_db)):
         if not email or not name:
             return PlainTextResponse("error|missing_data|Email and name are required", status_code=400)
         
-        # Bazadan foydalanuvchini qidirish
+        if not db_initialized:
+            # Database yo'q bo'lsa dummy response
+            user_info = {
+                "id": str(uuid.uuid4()),
+                "email": email,
+                "name": name,
+                "picture": picture,
+                "google_id": google_id
+            }
+            return PlainTextResponse(f"success|{json.dumps(user_info)}|User authenticated successfully")
+        
+        # Database bilan ishlash
         try:
-            user = db.query(User).filter(User.email == email).first()
+            user = get_user_by_email(email)
             
             if not user:
-                user = User(
-                    id=str(uuid.uuid4()),
-                    email=email,
-                    name=name,
-                    picture=picture,
-                    created_at=datetime.utcnow()
-                )
-                db.add(user)
-                db.commit()
-                db.refresh(user)
+                user = create_user(email, name, picture)
                 logger.info(f"New user created: {email}")
             else:
-                user.name = name
-                user.picture = picture
-                db.commit()
+                user = update_user(email, name, picture)
                 logger.info(f"Existing user updated: {email}")
+                
+            if not user:
+                return PlainTextResponse("error|database_error|Failed to create/update user", status_code=500)
+        
         except Exception as db_error:
-            try:
-                db.rollback()
-            except:
-                pass
             logger.error(f"Database error in auth: {str(db_error)}")
             return PlainTextResponse(f"error|database_error|Database operation failed", status_code=500)
         
         user_info = {
-            "id": str(user.id) if hasattr(user, 'id') else str(uuid.uuid4()),
+            "id": str(user['id']),
             "email": email,
             "name": name,
             "picture": picture,
@@ -456,8 +547,8 @@ async def google_auth(request: Request, db: Session = Depends(get_db)):
         logger.error("Google auth failed", error=str(e))
         return PlainTextResponse(f"error|auth_failed|{str(e)}", status_code=500)
 
-# FIXED: Chat processing with better error handling
-async def process_chat(ai_assistant, message: str, user_id: str, conversation_id: str | None, ai_type: str, db: Session):
+# Chat processing function
+async def process_chat(ai_assistant, message: str, user_id: str, conversation_id: str | None, ai_type: str):
     try:
         if not user_id:
             return PlainTextResponse("error|missing_user_id|User ID is required", status_code=400)
@@ -466,71 +557,30 @@ async def process_chat(ai_assistant, message: str, user_id: str, conversation_id
         
         ai_response = await ai_assistant.get_response(message)
         
-        try:
-            # Yangi suhbat yaratish
-            if not conversation_id:
-                conversation_id = str(uuid.uuid4())
-                conversation = Conversation(
-                    id=conversation_id,
-                    user_id=str(user_id),
-                    ai_type=ai_type,
-                    title=message[:50] + "..." if len(message) > 50 else message
-                )
-                db.add(conversation)
-            
-            # Xabarni saqlash
-            message_entry = Message(
-                id=str(uuid.uuid4()),
-                conversation_id=conversation_id,
-                user_id=str(user_id),
-                content=message,
-                ai_response=ai_response
-            )
-            db.add(message_entry)
-            
-            # Statistikani yangilash
-            stats = db.query(UserStats).filter(
-                UserStats.user_id == str(user_id),
-                UserStats.ai_type == ai_type
-            ).first()
-            
-            if not stats:
-                stats = UserStats(
-                    id=str(uuid.uuid4()),
-                    user_id=str(user_id),
-                    ai_type=ai_type,
-                    usage_count=1
-                )
-                db.add(stats)
-            else:
-                stats.usage_count += 1
-                stats.last_used = datetime.utcnow()
-            
-            # Suhbat vaqtini yangilash
-            if conversation_id:
-                conversation = db.query(Conversation).filter(
-                    Conversation.id == conversation_id
-                ).first()
-                if conversation:
-                    conversation.updated_at = datetime.utcnow()
-            
-            db.commit()
-            
-        except Exception as db_error:
+        if db_initialized:
             try:
-                db.rollback()
-            except:
+                # Yangi suhbat yaratish
+                if not conversation_id:
+                    title = message[:50] + "..." if len(message) > 50 else message
+                    conversation_id = create_conversation(user_id, ai_type, title)
+                
+                # Xabar saqlash
+                if conversation_id:
+                    save_message(conversation_id, user_id, message, ai_response)
+                    update_user_stats(user_id, ai_type)
+                    update_conversation_timestamp(conversation_id)
+                
+            except Exception as db_error:
+                logger.error(f"Database error in chat: {str(db_error)}")
+                # Database xatosi bo'lsa ham AI javobini qaytarish
                 pass
-            logger.error(f"Database error in chat: {str(db_error)}")
-            # Database xatosi bo'lsa ham AI javobini qaytarish
-            return PlainTextResponse(f"success|{ai_response}|{conversation_id or 'temp'}")
         
-        return PlainTextResponse(f"success|{ai_response}|{conversation_id}")
+        return PlainTextResponse(f"success|{ai_response}|{conversation_id or 'temp'}")
     except Exception as e:
         logger.error(f"Chat failed for {ai_type}", error=str(e))
         return PlainTextResponse(f"error|chat_failed|{str(e)}", status_code=500)
 
-async def handle_chat_request(request: Request, ai_type: str, db: Session = Depends(get_db)):
+async def handle_chat_request(request: Request, ai_type: str):
     try:
         body = await request.json()
         message = body.get("message")
@@ -542,14 +592,7 @@ async def handle_chat_request(request: Request, ai_type: str, db: Session = Depe
         if not AI_ASSISTANTS.get(ai_type):
             return PlainTextResponse(f"error|invalid_ai_type|AI type '{ai_type}' not found", status_code=404)
         
-        return await process_chat(
-            AI_ASSISTANTS[ai_type], 
-            message, 
-            user_id, 
-            conversation_id, 
-            ai_type, 
-            db
-        )
+        return await process_chat(AI_ASSISTANTS[ai_type], message, user_id, conversation_id, ai_type)
     except json.JSONDecodeError:
         return PlainTextResponse("error|invalid_json|Invalid JSON data", status_code=400)
     except Exception as e:
@@ -558,7 +601,7 @@ async def handle_chat_request(request: Request, ai_type: str, db: Session = Depe
 
 # AI ID ga asosan routing
 @app.post("/api/ai/{ai_id}")
-async def api_chat_by_id(ai_id: int, request: Request, db: Session = Depends(get_db)):
+async def api_chat_by_id(ai_id: int, request: Request):
     try:
         ai_type_mapping = {
             1: 'chat', 2: 'tarjimon', 3: 'blockchain', 4: 'tadqiqot', 5: 'smart_energy',
@@ -574,7 +617,7 @@ async def api_chat_by_id(ai_id: int, request: Request, db: Session = Depends(get
         
         print(f"Converting AI ID {ai_id} to type '{ai_type}'")
         
-        return await handle_chat_request(request, ai_type, db)
+        return await handle_chat_request(request, ai_type)
     except Exception as e:
         logger.error(f"API chat by ID failed for {ai_id}", error=str(e))
         return PlainTextResponse(f"error|api_chat_failed|{str(e)}", status_code=500)
@@ -590,17 +633,20 @@ chat_endpoints = [
 # Dynamic endpoint creation
 for ai_type in chat_endpoints:
     def create_handler(ai_type_name):
-        async def handler(request: Request, db: Session = Depends(get_db)):
-            return await handle_chat_request(request, ai_type_name, db)
+        async def handler(request: Request):
+            return await handle_chat_request(request, ai_type_name)
         return handler
     
     handler = create_handler(ai_type)
     app.add_api_route(f"/chat/{ai_type}", handler, methods=["POST"])
     app.add_api_route(f"/api/chat/{ai_type}", handler, methods=["POST"])
 
-# FIXED: Chat management with better database error handling
+# Chat management endpoints (PostgreSQL bilan)
 @app.post("/api/chats")
-async def create_or_update_chat(request: Request, db: Session = Depends(get_db)):
+async def create_or_update_chat(request: Request):
+    if not db_initialized:
+        return PlainTextResponse("error|database_unavailable|Database not available", status_code=503)
+    
     try:
         body = await request.json()
         chat_id = body.get("id") or str(uuid.uuid4())
@@ -608,145 +654,114 @@ async def create_or_update_chat(request: Request, db: Session = Depends(get_db))
         user_id = str(body.get("user_id", "")).strip()
         ai_type = body.get("ai_type", "chat")
         
-        # User ID tekshirish
-        if not user_id or user_id == "":
-            print(f"⚠️ WARNING: Empty user_id for chat creation")
-            auth_header = request.headers.get("authorization", "")
-            if auth_header:
-                try:
-                    token = auth_header.replace("Bearer ", "")
-                    payload = jwt.decode(token, options={"verify_signature": False})
-                    user_id = payload.get("sub", payload.get("user_id", ""))
-                    print(f"🔍 User ID from token: {user_id}")
-                except Exception as e:
-                    print(f"❌ Token decode error: {str(e)}")
-        
-        print(f"CREATE/UPDATE CHAT: {chat_id}, user: {user_id or 'EMPTY'}, type: {ai_type}")
+        if not user_id:
+            return PlainTextResponse("error|missing_user_id|User ID is required", status_code=400)
         
         try:
-            conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-            
-            if not conversation:
-                conversation = Conversation(
-                    id=chat_id,
-                    user_id=user_id or "anonymous",
-                    ai_type=ai_type,
-                    title=title,
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow()
-                )
-                db.add(conversation)
-                print(f"NEW CHAT CREATED: {chat_id} for user: {user_id or 'anonymous'}")
-            else:
-                conversation.title = title
-                conversation.updated_at = datetime.utcnow()
-                if user_id:
-                    conversation.user_id = user_id
-                print(f"CHAT UPDATED: {chat_id} for user: {conversation.user_id}")
-            
-            db.commit()
-            db.refresh(conversation)
-            
+            with get_db_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    # Mavjud suhbat bormi tekshirish
+                    cur.execute("SELECT * FROM conversations WHERE id = %s", (chat_id,))
+                    conversation = cur.fetchone()
+                    
+                    if not conversation:
+                        # Yangi suhbat yaratish
+                        cur.execute("""
+                            INSERT INTO conversations (id, user_id, ai_type, title, created_at, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            RETURNING *
+                        """, (chat_id, user_id, ai_type, title, datetime.utcnow(), datetime.utcnow()))
+                        conversation = cur.fetchone()
+                    else:
+                        
+                        # Mavjud suhbatni yangilash
+                        cur.execute("""
+                            UPDATE conversations 
+                            SET title = %s, updated_at = %s
+                            WHERE id = %s
+                            RETURNING *
+                        """, (title, datetime.utcnow(), chat_id))
+                        conversation = cur.fetchone()
+                    
+                    conn.commit()
+                    
+                    chat_data = {
+                        "id": conversation['id'],
+                        "ai_type": ai_type,
+                        "title": title,
+                        "user_id": user_id,
+                        "created_at": conversation['created_at'].isoformat(),
+                        "updated_at": conversation['updated_at'].isoformat()
+                    }
+                    
+                    return PlainTextResponse(f"success|{json.dumps(chat_data)}|Chat saved successfully")
+                    
         except Exception as db_error:
-            try:
-                db.rollback()
-            except:
-                pass
-            logger.error(f"Database error in create chat: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to save chat", status_code=500)
-        
-        chat_data = {
-            "id": conversation.id if hasattr(conversation, 'id') else chat_id,
-            "ai_type": ai_type,
-            "title": title,
-            "user_id": user_id or "anonymous",
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
-        }
-        
-        return PlainTextResponse(f"success|{json.dumps(chat_data)}|Chat saved successfully")
+            print(f"Database error in create/update chat: {str(db_error)}")
+            return PlainTextResponse("error|database_error|Failed to save chat", status_code=500)
         
     except json.JSONDecodeError:
         return PlainTextResponse("error|invalid_json|Invalid JSON data", status_code=400)
     except Exception as e:
-        print(f"❌ CREATE CHAT ERROR: {str(e)}")
+        print(f"Create/update chat error: {str(e)}")
         return PlainTextResponse(f"error|create_failed|{str(e)}", status_code=500)
 
-
 @app.put("/api/chats/{chat_id}")
-async def update_chat(chat_id: str, request: Request, db: Session = Depends(get_db)):
+async def update_chat(chat_id: str, request: Request):
+    if not db_initialized:
+        return PlainTextResponse("error|database_unavailable|Database not available", status_code=503)
+    
     try:
         body = await request.json()
         title = body.get("title", "New Chat")
         user_id = str(body.get("user_id", "")).strip()
         ai_type = body.get("ai_type", "chat")
         
-        # User ID tekshirish
-        if not user_id or user_id == "":
-            print(f"⚠️ WARNING: Empty user_id for chat {chat_id}")
-            auth_header = request.headers.get("authorization", "")
-            if auth_header:
-                try:
-                    token = auth_header.replace("Bearer ", "")
-                    payload = jwt.decode(token, options={"verify_signature": False})
-                    user_id = payload.get("sub", payload.get("user_id", ""))
-                    print(f"🔍 User ID from token: {user_id}")
-                except Exception as e:
-                    print(f"❌ Token decode error: {str(e)}")
-        
-        print(f"UPDATE CHAT: {chat_id}, user: {user_id or 'EMPTY'}, type: {ai_type}")
+        if not user_id:
+            return PlainTextResponse("error|missing_user_id|User ID is required", status_code=400)
         
         try:
-            conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-            
-            if not conversation:
-                conversation = Conversation(
-                    id=chat_id,
-                    user_id=user_id or "anonymous",
-                    ai_type=ai_type,
-                    title=title,
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow()
-                )
-                db.add(conversation)
-                print(f"NEW CHAT CREATED: {chat_id} for user: {user_id or 'anonymous'}")
-            else:
-                conversation.title = title
-                conversation.updated_at = datetime.utcnow()
-                if user_id:
-                    conversation.user_id = user_id
-                print(f"CHAT UPDATED: {chat_id} for user: {conversation.user_id}")
-            
-            db.commit()
-            
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE conversations 
+                        SET title = %s, updated_at = %s
+                        WHERE id = %s AND user_id = %s
+                    """, (title, datetime.utcnow(), chat_id, user_id))
+                    
+                    if cur.rowcount == 0:
+                        return PlainTextResponse("error|chat_not_found|Chat not found or access denied", status_code=404)
+                    
+                    conn.commit()
+                    return PlainTextResponse("success|chat_updated|Chat updated successfully")
+                    
         except Exception as db_error:
-            try:
-                db.rollback()
-            except:
-                pass
-            logger.error(f"Database error in update chat: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to update chat", status_code=500)
-        
-        return PlainTextResponse("success|chat_saved|Chat saved successfully")
+            print(f"Database error in update chat: {str(db_error)}")
+            return PlainTextResponse("error|database_error|Failed to update chat", status_code=500)
         
     except json.JSONDecodeError:
         return PlainTextResponse("error|invalid_json|Invalid JSON data", status_code=400)
     except Exception as e:
-        print(f"❌ UPDATE CHAT ERROR: {str(e)}")
+        print(f"Update chat error: {str(e)}")
         return PlainTextResponse(f"error|update_failed|{str(e)}", status_code=500)
 
 @app.get("/api/chats/user/{user_id}")
-async def get_user_chats(user_id: str, db: Session = Depends(get_db)):
+async def get_user_chats(user_id: str):
+    if not db_initialized:
+        return PlainTextResponse("error|database_unavailable|Database not available", status_code=503)
+    
     try:
         print(f"GET USER CHATS: {user_id}")
         
-        try:
-            conversations = db.query(Conversation).filter(
-                Conversation.user_id == str(user_id)
-            ).order_by(Conversation.updated_at.desc()).all()
-        except Exception as db_error:
-            logger.error(f"Database error in get chats: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to retrieve chats", status_code=500)
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT * FROM conversations 
+                    WHERE user_id = %s 
+                    ORDER BY updated_at DESC
+                """, (user_id,))
+                
+                conversations = cur.fetchall()
         
         if not conversations:
             print(f"No chats found for user {user_id}")
@@ -754,7 +769,7 @@ async def get_user_chats(user_id: str, db: Session = Depends(get_db)):
         
         chats_data = []
         for conv in conversations:
-            chats_data.append(f"{conv.id}|{conv.ai_type}|{conv.title}|{conv.created_at}|{conv.updated_at}")
+            chats_data.append(f"{conv['id']}|{conv['ai_type']}|{conv['title']}|{conv['created_at']}|{conv['updated_at']}")
         
         result = "\n".join(chats_data)
         print(f"Found {len(conversations)} chats for user {user_id}")
@@ -762,36 +777,40 @@ async def get_user_chats(user_id: str, db: Session = Depends(get_db)):
         return PlainTextResponse(f"success|{result}|Chats retrieved")
         
     except Exception as e:
-        print(f"GET CHATS ERROR: {str(e)}")
+        print(f"Get chats error: {str(e)}")
         return PlainTextResponse(f"error|get_chats_failed|{str(e)}", status_code=500)
 
 @app.get("/api/chats/{chat_id}")
-async def get_chat_details(chat_id: str, db: Session = Depends(get_db)):
+async def get_chat_details(chat_id: str):
+    if not db_initialized:
+        return PlainTextResponse("error|database_unavailable|Database not available", status_code=503)
+    
     try:
         print(f"GET CHAT DETAILS: {chat_id}")
         
-        try:
-            conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-        except Exception as db_error:
-            logger.error(f"Database error in get chat details: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to retrieve chat details", status_code=500)
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Suhbat ma'lumotlari
+                cur.execute("SELECT * FROM conversations WHERE id = %s", (chat_id,))
+                conversation = cur.fetchone()
+                
+                if not conversation:
+                    return PlainTextResponse("error|chat_not_found|Chat not found", status_code=404)
+                
+                # Xabarlar
+                cur.execute("""
+                    SELECT * FROM messages 
+                    WHERE conversation_id = %s 
+                    ORDER BY timestamp ASC
+                """, (chat_id,))
+                
+                messages = cur.fetchall()
         
-        if not conversation:
-            return PlainTextResponse("error|chat_not_found|Chat not found", status_code=404)
-        
-        try:
-            messages = db.query(Message).filter(
-                Message.conversation_id == chat_id
-            ).order_by(Message.timestamp.asc()).all()
-        except Exception as db_error:
-            logger.error(f"Database error in get messages: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to retrieve messages", status_code=500)
-        
-        chat_info = f"{conversation.id}|{conversation.ai_type}|{conversation.title}|{conversation.created_at}|{conversation.updated_at}"
+        chat_info = f"{conversation['id']}|{conversation['ai_type']}|{conversation['title']}|{conversation['created_at']}|{conversation['updated_at']}"
         
         if messages:
             messages_info = "\n".join([
-                f"MSG:{msg.id}|{msg.content}|{msg.ai_response}|{msg.timestamp}"
+                f"MSG:{msg['id']}|{msg['content']}|{msg['ai_response']}|{msg['timestamp']}"
                 for msg in messages
             ])
             return PlainTextResponse(f"success|{chat_info}|{messages_info}")
@@ -799,31 +818,32 @@ async def get_chat_details(chat_id: str, db: Session = Depends(get_db)):
             return PlainTextResponse(f"success|{chat_info}|no_messages")
         
     except Exception as e:
-        print(f"GET CHAT DETAILS ERROR: {str(e)}")
+        print(f"Get chat details error: {str(e)}")
         return PlainTextResponse(f"error|get_chat_failed|{str(e)}", status_code=500)
 
 @app.get("/api/chats/{chat_id}/messages")
-async def get_chat_messages_api(chat_id: str, db: Session = Depends(get_db)):
+async def get_chat_messages_api(chat_id: str):
+    if not db_initialized:
+        return PlainTextResponse("error|database_unavailable|Database not available", status_code=503)
+    
     try:
         print(f"GET CHAT MESSAGES: {chat_id}")
         
-        try:
-            conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-        except Exception as db_error:
-            logger.error(f"Database error in get chat messages: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to retrieve chat", status_code=500)
-        
-        if not conversation:
-            print(f"Chat not found: {chat_id}")
-            return PlainTextResponse("error|chat_not_found|Chat not found", status_code=404)
-        
-        try:
-            messages = db.query(Message).filter(
-                Message.conversation_id == chat_id
-            ).order_by(Message.timestamp.asc()).all()
-        except Exception as db_error:
-            logger.error(f"Database error in get messages: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to retrieve messages", status_code=500)
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Suhbat mavjudligini tekshirish
+                cur.execute("SELECT id FROM conversations WHERE id = %s", (chat_id,))
+                if not cur.fetchone():
+                    return PlainTextResponse("error|chat_not_found|Chat not found", status_code=404)
+                
+                # Xabarlar
+                cur.execute("""
+                    SELECT * FROM messages 
+                    WHERE conversation_id = %s 
+                    ORDER BY timestamp ASC
+                """, (chat_id,))
+                
+                messages = cur.fetchall()
         
         if not messages:
             print(f"No messages found for chat: {chat_id}")
@@ -831,7 +851,7 @@ async def get_chat_messages_api(chat_id: str, db: Session = Depends(get_db)):
         
         messages_data = []
         for msg in messages:
-            messages_data.append(f"MSG:{msg.id}|{msg.content}|{msg.ai_response}|{msg.timestamp}")
+            messages_data.append(f"MSG:{msg['id']}|{msg['content']}|{msg['ai_response']}|{msg['timestamp']}")
         
         result = "\n".join(messages_data)
         print(f"Found {len(messages)} messages for chat: {chat_id}")
@@ -839,12 +859,14 @@ async def get_chat_messages_api(chat_id: str, db: Session = Depends(get_db)):
         return PlainTextResponse(f"success|{result}|Messages retrieved")
         
     except Exception as e:
-        print(f"GET MESSAGES ERROR: {str(e)}")
+        print(f"Get messages error: {str(e)}")
         return PlainTextResponse(f"error|get_messages_failed|{str(e)}", status_code=500)
 
 @app.delete("/api/chats/{chat_id}")
-async def delete_chat(chat_id: str, request: Request, db: Session = Depends(get_db)):
-    """Bitta chatni o'chirish"""
+async def delete_chat(chat_id: str, request: Request):
+    if not db_initialized:
+        return PlainTextResponse("error|database_unavailable|Database not available", status_code=503)
+    
     try:
         user_id = request.query_params.get("user_id")
         if not user_id:
@@ -859,137 +881,121 @@ async def delete_chat(chat_id: str, request: Request, db: Session = Depends(get_
         if chat_id == "undefined" or not chat_id:
             return PlainTextResponse("error|invalid_chat_id|Chat ID is required", status_code=400)
         
-        try:
-            conversation = db.query(Conversation).filter(Conversation.id == chat_id).first()
-        except Exception as db_error:
-            logger.error(f"Database error in delete chat: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to access chat", status_code=500)
-        
-        if not conversation:
-            return PlainTextResponse("error|chat_not_found|Chat not found", status_code=404)
-        
-        if user_id and conversation.user_id != str(user_id):
-            return PlainTextResponse("error|unauthorized|Unauthorized to delete this chat", status_code=403)
-        
-        try:
-            db.query(Message).filter(Message.conversation_id == chat_id).delete()
-            db.delete(conversation)
-            db.commit()
-        except Exception as db_error:
-            try:
-                db.rollback()
-            except:
-                pass
-            logger.error(f"Database error in delete chat: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to delete chat", status_code=500)
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Suhbat mavjudligini va egasini tekshirish
+                cur.execute("SELECT user_id FROM conversations WHERE id = %s", (chat_id,))
+                conversation = cur.fetchone()
+                
+                if not conversation:
+                    return PlainTextResponse("error|chat_not_found|Chat not found", status_code=404)
+                
+                if user_id and conversation[0] != str(user_id):
+                    return PlainTextResponse("error|unauthorized|Unauthorized to delete this chat", status_code=403)
+                
+                # Xabarlarni o'chirish
+                cur.execute("DELETE FROM messages WHERE conversation_id = %s", (chat_id,))
+                
+                # Suhbatni o'chirish
+                cur.execute("DELETE FROM conversations WHERE id = %s", (chat_id,))
+                
+                conn.commit()
         
         print(f"CHAT DELETED: {chat_id}")
         return PlainTextResponse("success|chat_deleted|Chat deleted successfully")
         
     except Exception as e:
-        print(f"DELETE CHAT ERROR: {str(e)}")
+        print(f"Delete chat error: {str(e)}")
         return PlainTextResponse(f"error|delete_failed|{str(e)}", status_code=500)
 
 @app.delete("/api/chats/user/{user_id}/all")
-async def delete_all_user_chats(user_id: str, db: Session = Depends(get_db)):
-    """User ning barcha chatlarini o'chirish"""
+async def delete_all_user_chats(user_id: str):
+    if not db_initialized:
+        return PlainTextResponse("error|database_unavailable|Database not available", status_code=503)
+    
     try:
         print(f"DELETE ALL CHATS FOR USER: {user_id}")
         
-        try:
-            conversations = db.query(Conversation).filter(
-                Conversation.user_id == str(user_id)
-            ).all()
-        except Exception as db_error:
-            logger.error(f"Database error in delete all chats: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to access chats", status_code=500)
-        
-        if not conversations:
-            print(f"No chats found for user {user_id}")
-            return PlainTextResponse("error|no_chats|No chats found to delete", status_code=404)
-        
-        conversation_ids = [conv.id for conv in conversations]
-        
-        try:
-            for conv_id in conversation_ids:
-                db.query(Message).filter(Message.conversation_id == conv_id).delete()
-            
-            db.query(Conversation).filter(
-                Conversation.user_id == str(user_id)
-            ).delete()
-            
-            db.commit()
-        except Exception as db_error:
-            try:
-                db.rollback()
-            except:
-                pass
-            logger.error(f"Database error in delete all chats: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to delete chats", status_code=500)
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # User ning barcha suhbatlarini topish
+                cur.execute("SELECT id FROM conversations WHERE user_id = %s", (user_id,))
+                conversations = cur.fetchall()
+                
+                if not conversations:
+                    return PlainTextResponse("error|no_chats|No chats found to delete", status_code=404)
+                
+                conversation_ids = [conv[0] for conv in conversations]
+                
+                # Xabarlarni o'chirish
+                for conv_id in conversation_ids:
+                    cur.execute("DELETE FROM messages WHERE conversation_id = %s", (conv_id,))
+                
+                # Suhbatlarni o'chirish
+                cur.execute("DELETE FROM conversations WHERE user_id = %s", (user_id,))
+                
+                conn.commit()
         
         print(f"ALL CHATS DELETED FOR USER: {user_id} ({len(conversations)} chats)")
         return PlainTextResponse(f"success|all_chats_deleted|{len(conversations)} chats deleted successfully")
         
     except Exception as e:
-        print(f"DELETE ALL CHATS ERROR: {str(e)}")
+        print(f"Delete all chats error: {str(e)}")
         return PlainTextResponse(f"error|delete_all_failed|{str(e)}", status_code=500)
 
-# FIXED: Stats endpoints with better error handling
+# Statistics endpoints
 @app.get("/api/stats/user/{user_id}")
-async def get_user_stats_api(user_id: str, db: Session = Depends(get_db)):
-    """User statistikalari - 422 xatosini hal qilish"""
+async def get_user_stats_api(user_id: str):
+    if not db_initialized:
+        return PlainTextResponse("error|database_unavailable|Database not available", status_code=503)
+    
     try:
         print(f"GET USER STATS: {user_id}")
         
-        # User ID formatini tekshirish
         if not user_id or len(user_id.strip()) == 0:
-            print(f"WARNING: Empty user_id provided")
             return PlainTextResponse("error|invalid_user_id|User ID cannot be empty", status_code=422)
         
-        # UUID formatini tekshirish
         user_id = user_id.strip()
-        if len(user_id) < 10:
-            print(f"WARNING: Too short user_id: {user_id}")
-            return PlainTextResponse("error|invalid_user_id|User ID format invalid", status_code=422)
         
-        try:
-            # User mavjudligini tekshirish
-            user_exists = db.query(User).filter(User.id == user_id).first()
-            if not user_exists:
-                print(f"User not found in database: {user_id}")
-                return PlainTextResponse("success|no_user_found|User not found, no statistics available")
-            
-            stats = db.query(UserStats).filter(
-                UserStats.user_id == str(user_id)
-            ).order_by(UserStats.usage_count.desc()).all()
-            
-            total_conversations = db.query(Conversation).filter(
-                Conversation.user_id == str(user_id)
-            ).count()
-            
-        except Exception as db_error:
-            logger.error(f"Database error in get stats: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to retrieve statistics", status_code=500)
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # User mavjudligini tekshirish
+                cur.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+                if not cur.fetchone():
+                    return PlainTextResponse("success|no_user_found|User not found, no statistics available")
+                
+                # Statistika
+                cur.execute("""
+                    SELECT * FROM user_stats 
+                    WHERE user_id = %s 
+                    ORDER BY usage_count DESC
+                """, (user_id,))
+                stats = cur.fetchall()
+                
+                # Suhbatlar soni
+                cur.execute("SELECT COUNT(*) FROM conversations WHERE user_id = %s", (user_id,))
+                total_conversations = cur.fetchone()[0]
         
-        total_messages = sum(stat.usage_count for stat in stats) if stats else 0
-        most_used_ai = stats[0].ai_type if stats else "None"
+        total_messages = sum(stat['usage_count'] for stat in stats) if stats else 0
+        most_used_ai = stats[0]['ai_type'] if stats else "None"
         
         if not stats:
-            print(f"No stats found for user {user_id}")
-            stats_data = []
-            stats_data.append("TOTAL_MESSAGES:0")
-            stats_data.append("TOTAL_CONVERSATIONS:0")  
-            stats_data.append("MOST_USED_AI:None")
+            stats_data = [
+                "TOTAL_MESSAGES:0",
+                "TOTAL_CONVERSATIONS:0",
+                "MOST_USED_AI:None"
+            ]
             result = "\n".join(stats_data)
             return PlainTextResponse(f"success|{result}|No statistics available yet")
         
-        stats_data = []
-        stats_data.append(f"TOTAL_MESSAGES:{total_messages}")
-        stats_data.append(f"TOTAL_CONVERSATIONS:{total_conversations}")  
-        stats_data.append(f"MOST_USED_AI:{most_used_ai}")
+        stats_data = [
+            f"TOTAL_MESSAGES:{total_messages}",
+            f"TOTAL_CONVERSATIONS:{total_conversations}",
+            f"MOST_USED_AI:{most_used_ai}"
+        ]
         
         for stat in stats:
-            stats_data.append(f"AI_STAT:{stat.ai_type}|{stat.usage_count}|{stat.last_used}")
+            stats_data.append(f"AI_STAT:{stat['ai_type']}|{stat['usage_count']}|{stat['last_used']}")
         
         result = "\n".join(stats_data)
         print(f"Stats retrieved for user {user_id}: {total_messages} messages, {total_conversations} chats")
@@ -997,94 +1003,86 @@ async def get_user_stats_api(user_id: str, db: Session = Depends(get_db)):
         return PlainTextResponse(f"success|{result}|Stats retrieved")
         
     except Exception as e:
-        print(f"GET STATS ERROR: {str(e)}")
-        return PlainTextResponse(f"error|stats_failed|Unable to retrieve statistics: {str(e)}", status_code=500)
+        print(f"Get stats error: {str(e)}")
+        return PlainTextResponse(f"error|stats_failed|{str(e)}", status_code=500)
 
 @app.get("/api/stats/chart/user/{user_id}")
-async def get_user_chart_stats_api(user_id: str, db: Session = Depends(get_db)):
-    """User chart statistikalari"""
+async def get_user_chart_stats_api(user_id: str):
+    if not db_initialized:
+        return PlainTextResponse("error|database_unavailable|Database not available", status_code=503)
+    
     try:
         print(f"GET USER CHART STATS: {user_id}")
         
-        # User ID tekshirish
         if not user_id or len(user_id.strip()) == 0:
             return PlainTextResponse("error|invalid_user_id|User ID cannot be empty", status_code=422)
         
-        user_id = user_id.strip()
-        
-        try:
-            stats = db.query(UserStats).filter(
-                UserStats.user_id == str(user_id)
-            ).order_by(UserStats.usage_count.desc()).limit(10).all()
-        except Exception as db_error:
-            logger.error(f"Database error in get chart stats: {str(db_error)}")
-            return PlainTextResponse(f"error|database_error|Failed to retrieve chart statistics", status_code=500)
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT * FROM user_stats 
+                    WHERE user_id = %s 
+                    ORDER BY usage_count DESC 
+                    LIMIT 10
+                """, (user_id.strip(),))
+                
+                stats = cur.fetchall()
         
         if not stats:
             chart_data = "LABELS:\nDATA:"
             return PlainTextResponse(f"success|{chart_data}|No chart data available")
         
-        labels = [stat.ai_type for stat in stats]
-        data = [stat.usage_count for stat in stats]
+        labels = [stat['ai_type'] for stat in stats]
+        data = [stat['usage_count'] for stat in stats]
         
         chart_data = f"LABELS:{','.join(labels)}\nDATA:{','.join(map(str, data))}"
         
         return PlainTextResponse(f"success|{chart_data}|Chart data retrieved")
         
     except Exception as e:
-        print(f"GET CHART STATS ERROR: {str(e)}")
+        print(f"Get chart stats error: {str(e)}")
         return PlainTextResponse(f"error|chart_failed|{str(e)}", status_code=500)
 
-# Legacy endpoints - backward compatibility uchun
+# Legacy endpoints
 @app.get("/conversations")
-async def get_conversations_legacy(user_id: str, db: Session = Depends(get_db)):
-    """Legacy endpoint - conversations"""
-    return await get_user_chats(user_id, db)
+async def get_conversations_legacy(user_id: str):
+    return await get_user_chats(user_id)
 
 @app.get("/api/conversations")
-async def api_get_conversations_legacy(user_id: str, db: Session = Depends(get_db)):
-    """Legacy API endpoint - conversations"""
-    return await get_user_chats(user_id, db)
+async def api_get_conversations_legacy(user_id: str):
+    return await get_user_chats(user_id)
 
-# OPTIONS handlers - CORS uchun
+# OPTIONS handlers for CORS
 @app.options("/api/chats")
 async def options_chats():
-    """CORS OPTIONS handler for /api/chats"""
     return PlainTextResponse("", status_code=200)
 
 @app.options("/api/chats/{chat_id}")
 async def options_chat():
-    """CORS OPTIONS handler for chat operations"""
     return PlainTextResponse("", status_code=200)
 
 @app.options("/api/chats/user/{user_id}/all")
 async def options_all_chats():
-    """CORS OPTIONS handler for delete all chats"""
     return PlainTextResponse("", status_code=200)
 
 @app.options("/api/chats/{chat_id}/messages")
 async def options_chat_messages():
-    """CORS OPTIONS handler for chat messages"""
     return PlainTextResponse("", status_code=200)
 
 @app.options("/api/stats/user/{user_id}")
 async def options_user_stats():
-    """CORS OPTIONS handler for user stats"""
     return PlainTextResponse("", status_code=200)
 
 @app.options("/api/stats/chart/user/{user_id}")
 async def options_chart_stats():
-    """CORS OPTIONS handler for chart stats"""
     return PlainTextResponse("", status_code=200)
 
 @app.options("/auth/google")
 async def options_google_auth():
-    """CORS OPTIONS handler for Google auth"""
     return PlainTextResponse("", status_code=200)
 
 @app.options("/api/auth/google")
 async def options_api_google_auth():
-    """CORS OPTIONS handler for API Google auth"""
     return PlainTextResponse("", status_code=200)
 
 # Dynamic OPTIONS handlers for chat endpoints
@@ -1098,13 +1096,11 @@ for ai_type in chat_endpoints:
     app.add_api_route(f"/chat/{ai_type}", options_handler, methods=["OPTIONS"])
     app.add_api_route(f"/api/chat/{ai_type}", options_handler, methods=["OPTIONS"])
 
-# AI ID endpoints uchun OPTIONS
 @app.options("/api/ai/{ai_id}")
 async def options_ai_by_id():
-    """CORS OPTIONS handler for AI by ID"""
     return PlainTextResponse("", status_code=200)
 
-# FIXED: Error handlers
+# Error handlers
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc):
     return PlainTextResponse("error|not_found|Endpoint not found", status_code=404)
@@ -1119,13 +1115,17 @@ async def validation_error_handler(request: Request, exc):
     logger.error("Validation error", error=str(exc))
     return PlainTextResponse("error|validation_error|Request validation failed", status_code=422)
 
-# FIXED: Health check with database - proper text() usage
+# Health check with database
 @app.get("/api/health/db")
-async def health_check_db(db: Session = Depends(get_db)):
-    """Database bilan birga health check"""
+async def health_check_db():
+    if not db_initialized:
+        return PlainTextResponse("error|db_unavailable|Database not available", status_code=503)
+    
     try:
-        # FIXED: Use text() for raw SQL
-        result = db.execute(text("SELECT 1")).fetchone()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
         return PlainTextResponse("success|healthy|Database connection OK")
     except Exception as e:
         logger.error("Database health check failed", error=str(e))
@@ -1134,7 +1134,6 @@ async def health_check_db(db: Session = Depends(get_db)):
 # AI modules status
 @app.get("/api/ai/status")
 async def ai_modules_status():
-    """AI modullarining holati"""
     try:
         status_data = []
         for ai_type, ai_instance in AI_ASSISTANTS.items():
@@ -1151,28 +1150,36 @@ async def ai_modules_status():
         return PlainTextResponse(f"success|{result}\n{summary}|AI modules status retrieved")
         
     except Exception as e:
-        print(f"AI STATUS ERROR: {str(e)}")
+        print(f"AI status error: {str(e)}")
         return PlainTextResponse(f"error|status_failed|{str(e)}", status_code=500)
 
-# Development endpoints (faqat DEBUG mode da)
+# Development endpoints
 if os.getenv("DEBUG", "False").lower() == "true":
     @app.get("/api/debug/tables")
-    async def debug_tables(db: Session = Depends(get_db)):
-        """Debug: Database tables info"""
+    async def debug_tables():
+        if not db_initialized:
+            return PlainTextResponse("error|db_unavailable|Database not available", status_code=503)
+        
         try:
             tables_info = []
             
-            users_count = db.query(User).count()
-            tables_info.append(f"users:{users_count}")
-            
-            conversations_count = db.query(Conversation).count()
-            tables_info.append(f"conversations:{conversations_count}")
-            
-            messages_count = db.query(Message).count()
-            tables_info.append(f"messages:{messages_count}")
-            
-            stats_count = db.query(UserStats).count()
-            tables_info.append(f"user_stats:{stats_count}")
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM users")
+                    users_count = cur.fetchone()[0]
+                    tables_info.append(f"users:{users_count}")
+                    
+                    cur.execute("SELECT COUNT(*) FROM conversations")
+                    conversations_count = cur.fetchone()[0]
+                    tables_info.append(f"conversations:{conversations_count}")
+                    
+                    cur.execute("SELECT COUNT(*) FROM messages")
+                    messages_count = cur.fetchone()[0]
+                    tables_info.append(f"messages:{messages_count}")
+                    
+                    cur.execute("SELECT COUNT(*) FROM user_stats")
+                    stats_count = cur.fetchone()[0]
+                    tables_info.append(f"user_stats:{stats_count}")
             
             result = "\n".join(tables_info)
             return PlainTextResponse(f"success|{result}|Tables info retrieved")
@@ -1182,19 +1189,17 @@ if os.getenv("DEBUG", "False").lower() == "true":
 
     @app.get("/api/debug/env")
     async def debug_env():
-        """Debug: Environment variables (maskirovka qilingan)"""
         try:
             env_info = []
             
             important_vars = [
-                "DATABASE_URL", "DB_HOST", "DB_USER", "DB_NAME", "DB_PORT",
-                "OPENAI_API_KEY", "GOOGLE_CLIENT_ID", "JWT_SECRET", 
-                "HOST", "PORT", "DEBUG", "CORS_ORIGINS"
+                "DATABASE_URL", "OPENAI_API_KEY", "GOOGLE_CLIENT_ID", 
+                "JWT_SECRET", "HOST", "PORT", "DEBUG", "CORS_ORIGINS"
             ]
             
             for var in important_vars:
                 value = os.getenv(var, "NOT_SET")
-                if var in ["DATABASE_URL", "OPENAI_API_KEY", "JWT_SECRET", "DB_PASSWORD", "GOOGLE_CLIENT_SECRET"]:
+                if var in ["DATABASE_URL", "OPENAI_API_KEY", "JWT_SECRET"]:
                     if value and value != "NOT_SET":
                         masked = value[:10] + "***" + value[-5:] if len(value) > 15 else "***"
                         env_info.append(f"{var}:{masked}")
@@ -1209,12 +1214,10 @@ if os.getenv("DEBUG", "False").lower() == "true":
         except Exception as e:
             return PlainTextResponse(f"error|debug_failed|{str(e)}", status_code=500)
 
-# FIXED: Logging middleware - proper error handling
+# Logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    """Request logging middleware - 422 xatolarini batafsil log qilish"""
     start_time = datetime.utcnow()
-    
     client_ip = request.client.host if request.client else "unknown"
     
     try:
@@ -1225,7 +1228,6 @@ async def log_requests(request: Request, call_next):
     
     process_time = (datetime.utcnow() - start_time).total_seconds()
     
-    # 422 xatolarini alohida log qilish
     if response.status_code == 422:
         print(f"⚠️ VALIDATION ERROR: {request.method} {request.url.path} - 422 - {process_time:.3f}s - IP: {client_ip}")
         print(f"   Query params: {dict(request.query_params)}")
@@ -1240,40 +1242,29 @@ async def log_requests(request: Request, call_next):
 # Startup event
 @app.on_event("startup")
 async def startup_event():
-    """Server ishga tushganda"""
     print("🚀 AI Universe Server starting...")
+    print(f"📊 Database initialized: {'Yes' if db_initialized else 'No'}")
     print(f"📊 Total AI assistants loaded: {len(AI_ASSISTANTS)}")
     active_ais = [name for name, ai in AI_ASSISTANTS.items() if not isinstance(ai, DummyAI)]
     dummy_ais = [name for name, ai in AI_ASSISTANTS.items() if isinstance(ai, DummyAI)]
-    print(f"✅ Active AI modules: {len(active_ais)} - {', '.join(active_ais[:5])}{'...' if len(active_ais) > 5 else ''}")
-    print(f"⚠️ Dummy AI modules: {len(dummy_ais)} - {', '.join(dummy_ais[:5])}{'...' if len(dummy_ais) > 5 else ''}")
+    print(f"✅ Active AI modules: {len(active_ais)}")
+    print(f"⚠️ Dummy AI modules: {len(dummy_ais)}")
     print("🌐 Server ready to serve requests!")
-    
-    # Database connection test
-    try:
-        if SessionLocal:
-            db = SessionLocal()
-            # FIXED: Use text() for raw SQL
-            db.execute(text("SELECT 1"))
-            db.close()
-            print("✅ Database connection test passed")
-        else:
-            print("⚠️ Database not available - using fallback mode")
-    except Exception as e:
-        print(f"❌ Database connection test failed: {str(e)}")
 
 # Shutdown event  
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Server to'xtashda"""
     print("🛑 AI Universe Server shutting down...")
+    if db_pool:
+        db_pool.closeall()
+        print("📊 Database connections closed")
     print("👋 Goodbye!")
 
 if __name__ == "__main__":
     import uvicorn
     
     host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", 8080))  # FIXED: Default port 8080
+    port = int(os.getenv("PORT", 8080))
     debug = os.getenv("DEBUG", "False").lower() == "true"
     log_level = os.getenv("LOG_LEVEL", "info").lower()
     
